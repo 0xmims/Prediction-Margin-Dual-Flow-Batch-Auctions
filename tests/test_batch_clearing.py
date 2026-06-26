@@ -45,7 +45,7 @@ def test_pm_dfba_liquidation_cannot_clear_below_collar_without_backstop():
         pm_dfba_depth_multiplier=1.0,
         backstop_depth_multiplier=0.0,
         pm_dfba_liquidation_slippage_multiplier=1.0,
-        liquidation_collar_buffer=0.05,
+        liquidation_collar_buffer=0.0,
     )
     event = ProbabilityJump(
         p0=0.60,
@@ -74,6 +74,35 @@ def test_pm_dfba_liquidation_uses_backstop_before_improving_to_collar():
         pm_dfba_depth_multiplier=1.0,
         backstop_depth_multiplier=0.25,
         pm_dfba_liquidation_slippage_multiplier=1.0,
+        liquidation_collar_buffer=0.0,
+    )
+    event = ProbabilityJump(
+        p0=0.60,
+        p_post=0.40,
+        jump_size=0.20,
+        public_jump=True,
+        private_jump=False,
+        terminal_jump=False,
+        adverse_jump=True,
+    )
+
+    execution = execute_liquidation(VenueType.PM_DFBA, event, config)
+
+    assert execution.executable_price == pytest.approx(0.40)
+    assert execution.executed_quantity == 25
+    assert execution.unfilled_quantity == 975
+    assert execution.collar_breached
+    assert execution.used_backstop_depth == 25
+
+
+def test_pm_dfba_liquidation_partially_fills_primary_depth_up_to_collar():
+    config = replace(
+        load_config("configs/baseline.json"),
+        quantity=1000,
+        base_liquidation_depth=100,
+        pm_dfba_depth_multiplier=1.0,
+        backstop_depth_multiplier=0.0,
+        pm_dfba_liquidation_slippage_multiplier=1.0,
         liquidation_collar_buffer=0.05,
     )
     event = ProbabilityJump(
@@ -89,7 +118,7 @@ def test_pm_dfba_liquidation_uses_backstop_before_improving_to_collar():
     execution = execute_liquidation(VenueType.PM_DFBA, event, config)
 
     assert execution.executable_price == pytest.approx(0.35)
-    assert execution.executed_quantity == 25
-    assert execution.unfilled_quantity == 975
+    assert execution.executed_quantity == pytest.approx(50)
+    assert execution.unfilled_quantity == pytest.approx(950)
     assert execution.collar_breached
-    assert execution.used_backstop_depth == 25
+    assert execution.used_backstop_depth == 0

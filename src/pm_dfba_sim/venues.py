@@ -187,25 +187,30 @@ def execute_liquidation(
         )
 
     collar_price = float(np.clip(event.p_post - config.liquidation_collar_buffer, 0.0, 1.0))
-    if not sell_collar_breached(primary_price, collar_price):
-        remaining = config.quantity - primary_quantity
-        backstop_fill = min(remaining, backstop_liquidation_depth(venue, config))
-        total_executed = primary_quantity + backstop_fill
-        proceeds = (primary_price * primary_quantity) + (collar_price * backstop_fill)
-        return LiquidationExecution(
-            executable_price=proceeds / total_executed if total_executed > 0 else None,
-            executed_quantity=total_executed,
-            unfilled_quantity=config.quantity - total_executed,
-            collar_breached=False,
-            used_backstop_depth=backstop_fill,
-        )
+    primary_fill = _collared_primary_sell_quantity(
+        requested_quantity=config.quantity,
+        depth=primary_depth,
+        venue=venue,
+        event=event,
+        config=config,
+        collar_price=collar_price,
+    )
+    primary_fill_price = (
+        _liquidation_price_for_quantity(primary_fill, primary_depth, venue, event, config)
+        if primary_fill > 0
+        else None
+    )
+    collar_breached = primary_fill < min(config.quantity, primary_depth)
+    remaining = config.quantity - primary_fill
+    backstop_fill = min(remaining, backstop_liquidation_depth(venue, config))
+    total_executed = primary_fill + backstop_fill
+    proceeds = ((primary_fill_price or 0.0) * primary_fill) + (collar_price * backstop_fill)
 
-    backstop_fill = min(config.quantity, backstop_liquidation_depth(venue, config))
     return LiquidationExecution(
-        executable_price=collar_price if backstop_fill > 0 else None,
-        executed_quantity=backstop_fill,
-        unfilled_quantity=config.quantity - backstop_fill,
-        collar_breached=True,
+        executable_price=proceeds / total_executed if total_executed > 0 else None,
+        executed_quantity=total_executed,
+        unfilled_quantity=config.quantity - total_executed,
+        collar_breached=collar_breached,
         used_backstop_depth=backstop_fill,
     )
 
@@ -232,6 +237,30 @@ def _liquidation_price_for_quantity(
     depth_ratio = quantity / max(depth, 1e-9)
     slippage = event.jump_size * liquidation_slippage_multiplier(venue, config) * depth_ratio * 0.5
     return float(np.clip(event.p_post - slippage, 0.0, 1.0))
+
+
+def _collared_primary_sell_quantity(
+    requested_quantity: float,
+    depth: float,
+    venue: VenueType,
+    event: ProbabilityJump,
+    config: MarketConfig,
+    collar_price: float,
+) -> float:
+    if requested_quantity <= 0 or depth <= 0:
+        return 0.0
+
+    full_quantity = min(requested_quantity, depth)
+    full_price = _liquidation_price_for_quantity(full_quantity, depth, venue, event, config)
+    if not sell_collar_breached(full_price, collar_price):
+        return full_quantity
+
+    slippage_unit = event.jump_size * liquidation_slippage_multiplier(venue, config) * 0.5
+    if slippage_unit <= 0:
+        return full_quantity if event.p_post >= collar_price else 0.0
+
+    max_depth_ratio = max(0.0, (event.p_post - collar_price) / slippage_unit)
+    return min(full_quantity, max_depth_ratio * depth)
 
 
 def taker_delay_cost(venue: VenueType, event: ProbabilityJump, config: MarketConfig) -> float:
