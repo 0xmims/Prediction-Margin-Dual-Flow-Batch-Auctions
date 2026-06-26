@@ -39,7 +39,9 @@ def summarize_trials(results: list[TrialResult]) -> pd.DataFrame:
                 "liquidation_shortfall_mean": float(group["liquidation_shortfall"].mean()),
                 "stale_quote_loss_mean": float(group["stale_quote_loss"].mean()),
                 "public_stale_quote_loss_mean": float(group["public_stale_quote_loss"].mean()),
-                "maker_loss_mean": float(group["maker_loss"].mean()),
+                "maker_loss_placeholder_mean": float(
+                    group["maker_loss_placeholder"].mean()
+                ),
                 "liquidation_trigger_rate": float(group["liquidation_triggered"].mean()),
                 "effective_liquidation_depth": float(group["effective_liquidation_depth"].mean()),
                 "taker_delay_cost": float(group["taker_delay_cost"].mean()),

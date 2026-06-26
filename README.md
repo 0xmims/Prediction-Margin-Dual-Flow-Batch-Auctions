@@ -16,7 +16,7 @@ In this repo, a venue design is more marginable if it can achieve one or more of
 - higher maximum safe leverage at a target bad-debt probability;
 - comparable maker economics and natural taker execution quality.
 
-The MVP computes bad-debt probability, bad-debt mean, bad-debt expected shortfall, liquidation shortfall, stale quote loss, public stale quote loss, maker loss, liquidation trigger rate, effective liquidation depth, safe leverage at a bad-debt tolerance, and a simplified taker delay cost.
+The MVP computes bad-debt probability, bad-debt mean, bad-debt expected shortfall, liquidation shortfall, stale quote loss, public stale quote loss, `maker_loss_placeholder`, liquidation trigger rate, effective liquidation depth, safe leverage at a bad-debt tolerance, and a simplified taker delay cost.
 
 ## Venue Designs
 
@@ -65,6 +65,13 @@ The run also creates `outputs/figures/` and `outputs/tables/` for future richer 
 python -m pm_dfba_sim.run_ablations --config configs/baseline.json --out outputs
 ```
 
+Optional plotting controls:
+
+```bash
+python -m pm_dfba_sim.run_ablations --config configs/baseline.json --out outputs --plot-leverage 3
+python -m pm_dfba_sim.run_ablations --config configs/baseline.json --out outputs --plot-all-leverages
+```
+
 The ablation run compares:
 
 - `CLOB`
@@ -72,9 +79,12 @@ The ablation run compares:
 - `DFBA`
 - `PM_DFBA_FULL`
 - `PM_DFBA_NO_VOL_CALL`
-- `PM_DFBA_NO_BACKSTOP`
+- `PM_DFBA_NO_BACKSTOP_ONLY`
 - `PM_DFBA_NO_MAKER_TAKER_SEGREGATION`
-- `PM_DFBA_TOXIC_FLOW_MISCLASSIFICATION`
+- `PM_DFBA_TOXIC_ONLY`
+- `PM_DFBA_TOXIC_WITH_BACKSTOP`
+- `PM_DFBA_ADVERSE_DEPTH_ONLY`
+- `PM_DFBA_ADVERSE_STACK`
 - `TERMINAL_JUMP_STRESS`
 
 The ablation runner writes:
@@ -84,13 +94,15 @@ The ablation runner writes:
 - `outputs/bad_debt_by_backstop_depth.csv`
 - `outputs/stale_loss_by_batch_interval.csv`
 - `outputs/terminal_jump_stress.csv`
+- `outputs/latency_sweep.csv`
 - `outputs/safe_leverage_vs_public_jump_share.png`
 - `outputs/bad_debt_by_backstop_depth.png`
 - `outputs/stale_loss_by_batch_interval.png`
 - `outputs/private_information_stress.png`
 - `outputs/terminal_jump_failure.png`
+- `outputs/latency_race_probability.png`
 
-The sweep values and toxic-flow stress multipliers live in `configs/baseline.json` so the load-bearing assumptions are visible and reviewable.
+The sweep values, latency values, collar mode, and toxic-flow stress multipliers live in `configs/baseline.json` so the load-bearing assumptions are visible and reviewable. The default collar mode is `vwap`, which applies the collar to the average primary liquidation fill; `marginal` is stricter and applies the collar to the final executable unit. Null safe-leverage values are left null in the CSV and omitted as zero-valued points in plots.
 
 ## MVP Limitations
 
@@ -105,7 +117,7 @@ The sweep values and toxic-flow stress multipliers live in `configs/baseline.jso
 
 ## Future Plan
 
-- Add parameter sweeps and ablations for protection factors, liquidity depth, latency, public/private information mix, and terminal jump intensity.
+- Add richer structural ablations for protection factors, liquidity depth, latency, public/private information mix, and terminal jump intensity.
 - Define real Kalshi and Polymarket data schemas.
 - Add empirical replay once message-level or high-quality snapshot/trade data is available.
 - Replace the simple liquidation and stale-loss abstractions with richer order-book and auction state machines.
