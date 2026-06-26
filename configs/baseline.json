@@ -31,5 +31,15 @@
   "fba_liquidation_slippage_multiplier": 0.85,
   "dfba_liquidation_slippage_multiplier": 0.75,
   "pm_dfba_liquidation_slippage_multiplier": 0.55,
-  "liquidation_collar_buffer": 0.05
+  "liquidation_collar_buffer": 0.05,
+
+  "public_jump_share_sweep": [0.0, 0.25, 0.5, 0.75, 1.0],
+  "private_jump_share_sweep": [0.0, 0.25, 0.5, 0.75, 1.0],
+  "terminal_jump_probability_sweep": [0.0, 0.01, 0.05, 0.10, 0.25],
+  "batch_interval_ms_sweep": [50, 100, 250, 500, 1000, 5000],
+  "backstop_depth_share_sweep": [0.0, 0.10, 0.25, 0.50, 1.0],
+
+  "toxic_flow_public_stale_loss_multiplier": 0.80,
+  "toxic_flow_private_stale_loss_multiplier": 0.95,
+  "toxic_flow_liquidation_slippage_multiplier": 1.10
 }

@@ -97,6 +97,14 @@ class MarketConfig:
     dfba_liquidation_slippage_multiplier: float
     pm_dfba_liquidation_slippage_multiplier: float
     liquidation_collar_buffer: float = 0.05
+    public_jump_share_sweep: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75, 1.0)
+    private_jump_share_sweep: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75, 1.0)
+    terminal_jump_probability_sweep: tuple[float, ...] = (0.0, 0.01, 0.05, 0.10, 0.25)
+    batch_interval_ms_sweep: tuple[float, ...] = (50.0, 100.0, 250.0, 500.0, 1000.0, 5000.0)
+    backstop_depth_share_sweep: tuple[float, ...] = (0.0, 0.10, 0.25, 0.50, 1.0)
+    toxic_flow_public_stale_loss_multiplier: float = 0.80
+    toxic_flow_private_stale_loss_multiplier: float = 0.95
+    toxic_flow_liquidation_slippage_multiplier: float = 1.10
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MarketConfig":
@@ -106,7 +114,17 @@ class MarketConfig:
             raise ValueError(f"unknown config fields: {sorted(unknown)}")
 
         normalized = dict(data)
-        normalized["leverage_values"] = tuple(float(x) for x in data["leverage_values"])
+        tuple_fields = {
+            "leverage_values",
+            "public_jump_share_sweep",
+            "private_jump_share_sweep",
+            "terminal_jump_probability_sweep",
+            "batch_interval_ms_sweep",
+            "backstop_depth_share_sweep",
+        }
+        for field_name in tuple_fields:
+            if field_name in normalized:
+                normalized[field_name] = tuple(float(x) for x in normalized[field_name])
         return cls(**normalized)
 
 

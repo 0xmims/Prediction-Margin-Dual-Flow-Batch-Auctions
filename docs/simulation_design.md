@@ -34,7 +34,7 @@ Safe leverage is reported as the highest tested leverage whose bad-debt probabil
 
 `PM_DFBA` normalizes YES/NO contracts onto one probability axis, uses maker/taker segregation, applies a simplified volatility-call protection for large public jumps, and models liquidation orders as auction-only, price-collared flow that can access committed backstop liquidity.
 
-The liquidation collar is a limit, not a price guarantee. If executable liquidity is worse than the collar, the MVP either routes to configured backstop depth or leaves the liquidation partially or fully unfilled. Unfilled quantity contributes no liquidation proceeds and can increase shortfall or bad debt.
+The liquidation collar is a limit, not a price guarantee. Primary liquidation liquidity can fill only up to the quantity executable at or above the collar. If the remaining executable liquidity is worse than the collar, the MVP either routes the remainder to configured backstop depth or leaves it partially or fully unfilled. Unfilled quantity contributes no liquidation proceeds and can increase shortfall or bad debt.
 
 ## Loss Decomposition
 
@@ -50,6 +50,8 @@ total loss =
 
 The MVP directly tracks stale quote loss, public stale quote loss, liquidation shortfall, bad debt, maker loss, and taker delay cost. Fundamental jump risk is represented by synthetic probability jumps and terminal resolution events.
 
+`maker_loss` is currently a placeholder alias for `stale_quote_loss`. The scaffold keeps it as a separate output column because later versions should distinguish maker inventory losses, picked-off stale quotes, and losses borne by financiers or liquidation engines. In the MVP, do not interpret `maker_loss_mean` as an independently estimated maker PnL series.
+
 ## MVP Simplifications
 
 - The order book is not fully simulated.
@@ -58,8 +60,33 @@ The MVP directly tracks stale quote loss, public stale quote loss, liquidation s
 - Liquidation exit quality is represented by venue-specific depth and slippage multipliers.
 - PM-DFBA volatility-call behavior is represented by a configurable public-jump threshold and stale-loss multiplier.
 - PM-DFBA price collars are modeled as a minimum sell execution price for liquidation flow.
+- Batch interval sweeps report stale quote loss and simplified taker delay cost. They are useful for sensitivity checks, but they are not a full auction state-machine model.
 
 These assumptions are synthetic placeholders, not empirical estimates.
+
+## Ablation Framework
+
+Issue #3 adds stress scenarios that are meant to identify load-bearing assumptions. The runner compares the core venues with PM-DFBA variants:
+
+- `PM_DFBA_FULL`: baseline PM-DFBA assumptions.
+- `PM_DFBA_NO_VOL_CALL`: public-jump volatility-call protection removed.
+- `PM_DFBA_NO_BACKSTOP`: committed backstop depth removed.
+- `PM_DFBA_NO_MAKER_TAKER_SEGREGATION`: PM-DFBA weakened toward FBA-like flow assumptions.
+- `PM_DFBA_TOXIC_FLOW_MISCLASSIFICATION`: toxic flow misclassification stress with weak depth, no backstop, and worse stale-loss/slippage multipliers.
+- `TERMINAL_JUMP_STRESS`: PM-DFBA under elevated terminal instant-resolution jump probability.
+
+The ablation runner sweeps public jump share, private jump share, terminal jump probability, batch interval, backstop depth, and leverage. These values live in `configs/baseline.json`.
+
+Interpretation rules:
+
+- PM-DFBA should help most when public jumps dominate and volatility-call protection is active.
+- PM-DFBA should help less when private information dominates because the public-jump protection is less relevant.
+- Removing backstop depth should worsen or leave unchanged liquidation shortfall. It should not improve liquidation outcomes.
+- Removing volatility-call protection should increase public stale-quote loss.
+- Toxic-flow misclassification should shrink or reverse PM-DFBA's stale-loss advantage.
+- Terminal instant-resolution jumps should still create bad debt at sufficient leverage.
+
+These are falsification-oriented synthetic checks. Passing them does not prove PM-DFBA works in real markets; it only shows the scaffold can express wins, losses, and weakened-mechanism cases.
 
 ## Invalidating Cases
 

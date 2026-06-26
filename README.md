@@ -59,6 +59,39 @@ The baseline writes:
 
 The run also creates `outputs/figures/` and `outputs/tables/` for future richer reporting.
 
+## Run Ablations
+
+```bash
+python -m pm_dfba_sim.run_ablations --config configs/baseline.json --out outputs
+```
+
+The ablation run compares:
+
+- `CLOB`
+- `FBA`
+- `DFBA`
+- `PM_DFBA_FULL`
+- `PM_DFBA_NO_VOL_CALL`
+- `PM_DFBA_NO_BACKSTOP`
+- `PM_DFBA_NO_MAKER_TAKER_SEGREGATION`
+- `PM_DFBA_TOXIC_FLOW_MISCLASSIFICATION`
+- `TERMINAL_JUMP_STRESS`
+
+The ablation runner writes:
+
+- `outputs/ablation_summary.csv`
+- `outputs/safe_leverage_by_public_jump_share.csv`
+- `outputs/bad_debt_by_backstop_depth.csv`
+- `outputs/stale_loss_by_batch_interval.csv`
+- `outputs/terminal_jump_stress.csv`
+- `outputs/safe_leverage_vs_public_jump_share.png`
+- `outputs/bad_debt_by_backstop_depth.png`
+- `outputs/stale_loss_by_batch_interval.png`
+- `outputs/private_information_stress.png`
+- `outputs/terminal_jump_failure.png`
+
+The sweep values and toxic-flow stress multipliers live in `configs/baseline.json` so the load-bearing assumptions are visible and reviewable.
+
 ## MVP Limitations
 
 - The MVP is synthetic and parameterized.
@@ -67,8 +100,7 @@ The run also creates `outputs/figures/` and `outputs/tables/` for future richer 
 - It abstracts agent behavior heavily.
 - It does not yet model full agent strategies.
 - It does not yet include empirical replay.
-- It does not yet include private-information sweeps.
-- It includes only placeholder terminal-resolution stress support.
+- Private-information and terminal-resolution sweeps are synthetic stress tests, not empirical estimates.
 - It does not prove PM-DFBA is superior; it creates a framework for testing.
 
 ## Future Plan

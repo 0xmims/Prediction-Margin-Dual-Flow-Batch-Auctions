@@ -26,7 +26,7 @@ def test_pm_dfba_collar_blocked_liquidation_uses_actual_zero_proceeds():
         pm_dfba_depth_multiplier=1.0,
         backstop_depth_multiplier=0.0,
         pm_dfba_liquidation_slippage_multiplier=1.0,
-        liquidation_collar_buffer=0.05,
+        liquidation_collar_buffer=0.0,
     )
     event = ProbabilityJump(
         p0=0.60,
