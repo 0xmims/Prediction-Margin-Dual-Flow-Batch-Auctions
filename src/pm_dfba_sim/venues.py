@@ -14,6 +14,21 @@ class ClearingResult:
     fill_quantity: float
 
 
+@dataclass(frozen=True)
+class LiquidationExecution:
+    executable_price: float | None
+    executed_quantity: float
+    unfilled_quantity: float
+    collar_breached: bool
+    used_backstop_depth: float
+
+    @property
+    def proceeds(self) -> float:
+        if self.executable_price is None:
+            return 0.0
+        return self.executable_price * self.executed_quantity
+
+
 def uniform_batch_clear(orders: list[NormalizedOrder]) -> ClearingResult:
     buys = sorted(
         [order for order in orders if order.side_on_yes_axis == Side.BUY and order.quantity > 0],
@@ -97,6 +112,10 @@ def stale_quote_loss(
 
 
 def effective_liquidation_depth(venue: VenueType, config: MarketConfig) -> float:
+    return primary_liquidation_depth(venue, config) + backstop_liquidation_depth(venue, config)
+
+
+def primary_liquidation_depth(venue: VenueType, config: MarketConfig) -> float:
     if venue == VenueType.CLOB:
         multiplier = config.clob_depth_multiplier
     elif venue == VenueType.FBA:
@@ -104,11 +123,17 @@ def effective_liquidation_depth(venue: VenueType, config: MarketConfig) -> float
     elif venue == VenueType.DFBA:
         multiplier = config.dfba_depth_multiplier
     elif venue == VenueType.PM_DFBA:
-        multiplier = config.pm_dfba_depth_multiplier + config.backstop_depth_multiplier
+        multiplier = config.pm_dfba_depth_multiplier
     else:
         raise ValueError(f"unsupported venue: {venue}")
 
     return config.base_liquidation_depth * multiplier
+
+
+def backstop_liquidation_depth(venue: VenueType, config: MarketConfig) -> float:
+    if venue == VenueType.PM_DFBA:
+        return config.base_liquidation_depth * config.backstop_depth_multiplier
+    return 0.0
 
 
 def liquidation_slippage_multiplier(venue: VenueType, config: MarketConfig) -> float:
@@ -123,9 +148,66 @@ def liquidation_slippage_multiplier(venue: VenueType, config: MarketConfig) -> f
     raise ValueError(f"unsupported venue: {venue}")
 
 
-def apply_sell_collar(exit_price: float, collar_price: float) -> float:
-    """A sell liquidation should not execute below its minimum collar."""
-    return max(exit_price, collar_price)
+def sell_collar_breached(executable_price: float, collar_price: float) -> bool:
+    """A sell collar rejects worse prices; it does not create a fill at the collar."""
+    return executable_price < collar_price
+
+
+def execute_liquidation(
+    venue: VenueType,
+    event: ProbabilityJump,
+    config: MarketConfig,
+) -> LiquidationExecution:
+    if event.terminal_jump:
+        return LiquidationExecution(
+            executable_price=event.p_post,
+            executed_quantity=config.quantity,
+            unfilled_quantity=0.0,
+            collar_breached=False,
+            used_backstop_depth=0.0,
+        )
+
+    primary_depth = primary_liquidation_depth(venue, config)
+    primary_quantity = min(config.quantity, primary_depth)
+    primary_price = _liquidation_price_for_quantity(
+        quantity=primary_quantity,
+        depth=primary_depth,
+        venue=venue,
+        event=event,
+        config=config,
+    )
+
+    if venue != VenueType.PM_DFBA:
+        return LiquidationExecution(
+            executable_price=primary_price if primary_quantity > 0 else None,
+            executed_quantity=primary_quantity,
+            unfilled_quantity=config.quantity - primary_quantity,
+            collar_breached=False,
+            used_backstop_depth=0.0,
+        )
+
+    collar_price = float(np.clip(event.p_post - config.liquidation_collar_buffer, 0.0, 1.0))
+    if not sell_collar_breached(primary_price, collar_price):
+        remaining = config.quantity - primary_quantity
+        backstop_fill = min(remaining, backstop_liquidation_depth(venue, config))
+        total_executed = primary_quantity + backstop_fill
+        proceeds = (primary_price * primary_quantity) + (collar_price * backstop_fill)
+        return LiquidationExecution(
+            executable_price=proceeds / total_executed if total_executed > 0 else None,
+            executed_quantity=total_executed,
+            unfilled_quantity=config.quantity - total_executed,
+            collar_breached=False,
+            used_backstop_depth=backstop_fill,
+        )
+
+    backstop_fill = min(config.quantity, backstop_liquidation_depth(venue, config))
+    return LiquidationExecution(
+        executable_price=collar_price if backstop_fill > 0 else None,
+        executed_quantity=backstop_fill,
+        unfilled_quantity=config.quantity - backstop_fill,
+        collar_breached=True,
+        used_backstop_depth=backstop_fill,
+    )
 
 
 def liquidation_exit_price(
@@ -133,19 +215,23 @@ def liquidation_exit_price(
     event: ProbabilityJump,
     config: MarketConfig,
 ) -> float:
-    if event.terminal_jump:
+    execution = execute_liquidation(venue, event, config)
+    return execution.executable_price or 0.0
+
+
+def _liquidation_price_for_quantity(
+    quantity: float,
+    depth: float,
+    venue: VenueType,
+    event: ProbabilityJump,
+    config: MarketConfig,
+) -> float:
+    if quantity <= 0:
         return event.p_post
 
-    depth = effective_liquidation_depth(venue, config)
-    depth_ratio = config.quantity / max(depth, 1e-9)
+    depth_ratio = quantity / max(depth, 1e-9)
     slippage = event.jump_size * liquidation_slippage_multiplier(venue, config) * depth_ratio * 0.5
-    exit_price = float(np.clip(event.p_post - slippage, 0.0, 1.0))
-
-    if venue == VenueType.PM_DFBA:
-        collar_price = float(np.clip(event.p_post - config.liquidation_collar_buffer, 0.0, 1.0))
-        return apply_sell_collar(exit_price, collar_price)
-
-    return exit_price
+    return float(np.clip(event.p_post - slippage, 0.0, 1.0))
 
 
 def taker_delay_cost(venue: VenueType, event: ProbabilityJump, config: MarketConfig) -> float:

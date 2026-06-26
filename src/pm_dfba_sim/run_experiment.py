@@ -78,7 +78,7 @@ def _plot_metric(summary: pd.DataFrame, metric: str, ylabel: str, path: Path) ->
 
 def _plot_safe_leverage(safe: pd.DataFrame, path: Path) -> None:
     fig, ax = plt.subplots(figsize=(8, 5))
-    values = safe["safe_leverage_at_bad_debt_tolerance"].fillna(0.0)
+    values = pd.to_numeric(safe["safe_leverage_at_bad_debt_tolerance"], errors="coerce").fillna(0.0)
     ax.bar(safe["venue"], values)
     ax.set_xlabel("Venue")
     ax.set_ylabel("Safe leverage")

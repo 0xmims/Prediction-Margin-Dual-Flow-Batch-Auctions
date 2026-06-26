@@ -34,6 +34,8 @@ Safe leverage is reported as the highest tested leverage whose bad-debt probabil
 
 `PM_DFBA` normalizes YES/NO contracts onto one probability axis, uses maker/taker segregation, applies a simplified volatility-call protection for large public jumps, and models liquidation orders as auction-only, price-collared flow that can access committed backstop liquidity.
 
+The liquidation collar is a limit, not a price guarantee. If executable liquidity is worse than the collar, the MVP either routes to configured backstop depth or leaves the liquidation partially or fully unfilled. Unfilled quantity contributes no liquidation proceeds and can increase shortfall or bad debt.
+
 ## Loss Decomposition
 
 The intended decomposition is:

@@ -7,16 +7,15 @@ import numpy as np
 
 from pm_dfba_sim.margin import (
     LeveragedLongYes,
+    bad_debt_amount,
     liquidation_barrier,
-    liquidation_shortfall,
     liquidation_triggers,
-    long_yes_bad_debt,
 )
 from pm_dfba_sim.probability import ProbabilityJump, generate_probability_jump
 from pm_dfba_sim.types import MarketConfig, TrialResult, VenueType
 from pm_dfba_sim.venues import (
+    execute_liquidation,
     effective_liquidation_depth,
-    liquidation_exit_price,
     stale_quote_loss,
     taker_delay_cost,
 )
@@ -67,13 +66,14 @@ def simulate_venue_trial(
         quantity=config.quantity,
         leverage=leverage,
     )
-    exit_price = liquidation_exit_price(venue, event, config)
+    execution = execute_liquidation(venue, event, config)
+    total_exit_price = execution.proceeds / config.quantity if config.quantity > 0 else 0.0
     barrier = liquidation_barrier(config.initial_price, leverage, config.maintenance_buffer)
-    triggered = liquidation_triggers(exit_price, barrier)
+    triggered = liquidation_triggers(total_exit_price, barrier)
 
     if triggered:
-        bad_debt = long_yes_bad_debt(position, exit_price)
-        shortfall = liquidation_shortfall(config.quantity, barrier, exit_price)
+        bad_debt = bad_debt_amount(position.debt, execution.proceeds)
+        shortfall = max(0.0, (barrier * config.quantity) - execution.proceeds)
     else:
         bad_debt = 0.0
         shortfall = 0.0
@@ -98,7 +98,11 @@ def simulate_venue_trial(
         stale_quote_loss=stale_loss,
         public_stale_quote_loss=stale_loss if event.public_jump else 0.0,
         liquidation_triggered=triggered,
-        liquidation_exit_price=exit_price,
+        liquidation_exit_price=execution.executable_price or 0.0,
+        liquidation_executed_quantity=execution.executed_quantity,
+        liquidation_unfilled_quantity=execution.unfilled_quantity,
+        liquidation_collar_breached=execution.collar_breached,
+        liquidation_used_backstop_depth=execution.used_backstop_depth,
         liquidation_shortfall=shortfall,
         bad_debt=bad_debt,
         maker_loss=stale_loss,

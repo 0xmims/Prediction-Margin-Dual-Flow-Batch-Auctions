@@ -124,6 +124,10 @@ class TrialResult:
     public_stale_quote_loss: float
     liquidation_triggered: bool
     liquidation_exit_price: float
+    liquidation_executed_quantity: float
+    liquidation_unfilled_quantity: float
+    liquidation_collar_breached: bool
+    liquidation_used_backstop_depth: float
     liquidation_shortfall: float
     bad_debt: float
     maker_loss: float
