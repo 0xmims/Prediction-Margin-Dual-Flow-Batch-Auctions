@@ -104,6 +104,16 @@ The ablation runner writes:
 
 The sweep values, latency values, collar mode, and toxic-flow stress multipliers live in `configs/baseline.json` so the load-bearing assumptions are visible and reviewable. The default collar mode is `vwap`, which applies the collar to the average primary liquidation fill; `marginal` is stricter and applies the collar to the final executable unit. Null safe-leverage values are left null in the CSV and omitted as zero-valued points in plots.
 
+## Paper Figures
+
+Generate deterministic explanatory concept figures for the v0.1 coworker paper draft:
+
+```bash
+python3 -m pm_dfba_sim.run_paper_figures --out outputs/paper_figures
+```
+
+These PNGs are schematic concept figures, not empirical results. See `docs/paper_figures.md` for the output paths and intended use.
+
 ## MVP Limitations
 
 - The MVP is synthetic and parameterized.
