@@ -41,6 +41,8 @@ class CalibrationResult:
     trade_size_summary: pd.DataFrame
     jump_windows: pd.DataFrame
     jump_size_distribution: pd.DataFrame
+    interim_jump_size_distribution: pd.DataFrame
+    terminal_jump_size_distribution: pd.DataFrame
     simulator_parameter_suggestions: dict[str, Any]
     price_paths: pd.DataFrame
     normalized_trades: pd.DataFrame
@@ -58,6 +60,7 @@ def run_calibration(
     windows: Iterable[str] = DEFAULT_WINDOWS,
     thresholds: Iterable[float] = DEFAULT_THRESHOLDS,
     rolling_vwap_trades: int = 20,
+    near_resolution_window: str = "24h",
 ) -> CalibrationResult:
     """Run a bounded local-data calibration pass and write derived outputs."""
 
@@ -87,24 +90,51 @@ def run_calibration(
 
     price_paths = build_price_paths(trades, rolling_window=rolling_vwap_trades)
     jump_windows = detect_jump_windows(price_paths, windows=windows, thresholds=thresholds)
+    jump_windows = label_near_resolution_jumps(
+        jump_windows,
+        metadata,
+        near_resolution_window=near_resolution_window,
+    )
+    event_jumps = label_near_resolution_jumps(
+        event_jumps,
+        metadata,
+        near_resolution_window=near_resolution_window,
+    )
     jump_size_distribution = build_jump_size_distribution(jump_windows, event_jumps)
+    interim_jump_size_distribution = jump_size_distribution[
+        ~jump_size_distribution["near_resolution"].fillna(False)
+    ].copy()
+    terminal_jump_size_distribution = jump_size_distribution[
+        jump_size_distribution["near_resolution"].fillna(False)
+    ].copy()
     market_summary = build_market_summary(trades, price_paths, jump_windows, metadata)
     trade_size_summary = build_trade_size_summary(trades)
     suggestions = build_simulator_parameter_suggestions(
         trades=trades,
         price_paths=price_paths,
         jump_size_distribution=jump_size_distribution,
+        interim_jump_size_distribution=interim_jump_size_distribution,
+        terminal_jump_size_distribution=terminal_jump_size_distribution,
         metadata=metadata,
         trade_paths=trade_paths,
         metadata_paths=metadata_paths,
         event_paths=event_paths,
         max_rows_per_file=max_rows_per_file,
+        near_resolution_window=near_resolution_window,
     )
 
     market_summary.to_csv(output_path / "market_summary.csv", index=False)
     trade_size_summary.to_csv(output_path / "trade_size_summary.csv", index=False)
     jump_windows.to_csv(output_path / "jump_windows.csv", index=False)
     jump_size_distribution.to_csv(output_path / "jump_size_distribution.csv", index=False)
+    interim_jump_size_distribution.to_csv(
+        output_path / "interim_jump_size_distribution.csv",
+        index=False,
+    )
+    terminal_jump_size_distribution.to_csv(
+        output_path / "terminal_jump_size_distribution.csv",
+        index=False,
+    )
     with (output_path / "simulator_parameter_suggestions.json").open("w") as f:
         json.dump(suggestions, f, indent=2, default=_json_default)
 
@@ -120,6 +150,8 @@ def run_calibration(
         trade_size_summary=trade_size_summary,
         jump_windows=jump_windows,
         jump_size_distribution=jump_size_distribution,
+        interim_jump_size_distribution=interim_jump_size_distribution,
+        terminal_jump_size_distribution=terminal_jump_size_distribution,
         simulator_parameter_suggestions=suggestions,
         price_paths=price_paths,
         normalized_trades=trades,
@@ -194,8 +226,12 @@ def load_normalized_trades(paths: Iterable[Path], max_rows_per_file: int) -> pd.
         raise CalibrationError(message)
 
     trades = pd.concat(frames, ignore_index=True)
+    raw_normalized_rows = len(trades)
     trades = trades.dropna(subset=["timestamp", "yes_price"])
     trades = trades[(trades["yes_price"] >= 0.0) & (trades["yes_price"] <= 1.0)]
+    trades = deduplicate_normalized_trades(trades)
+    trades.attrs["raw_normalized_rows"] = raw_normalized_rows
+    trades.attrs["deduplicated_rows_removed"] = raw_normalized_rows - len(trades)
     trades = trades.sort_values(["market_id", "timestamp"]).reset_index(drop=True)
     return trades
 
@@ -213,7 +249,9 @@ def normalize_trade_frame(frame: pd.DataFrame, source_path: str | Path = "<memor
             "created_time, timestamp, time, datetime, minute, or date."
         )
 
-    yes_price, raw_price_col, price_assumption = construct_yes_equivalent_price(frame)
+    yes_price, raw_price_col, price_assumption, orientation_verified = construct_yes_equivalent_price(
+        frame
+    )
     if yes_price is None:
         raise CalibrationError(
             f"Missing price column in {source_path}; expected yes_price/no_price, "
@@ -231,6 +269,10 @@ def normalize_trade_frame(frame: pd.DataFrame, source_path: str | Path = "<memor
         columns,
         exact=("notional", "usdc_amount", "volume_usd", "amount_usd"),
         contains=("notional", "usdc"),
+    )
+    trade_id_col = choose_column(
+        columns,
+        exact=("trade_id", "tx_hash", "transaction_hash", "signature", "hash"),
     )
 
     timestamps = pd.to_datetime(frame[timestamp_col], errors="coerce", utc=True)
@@ -261,6 +303,8 @@ def normalize_trade_frame(frame: pd.DataFrame, source_path: str | Path = "<memor
             "notional": notional,
             "raw_price_column": raw_price_col,
             "price_assumption": price_assumption,
+            "orientation_verified": orientation_verified,
+            "trade_id": frame[trade_id_col].astype(str) if trade_id_col else pd.NA,
         }
     )
     midpoint = construct_midpoint_proxy(frame)
@@ -269,7 +313,31 @@ def normalize_trade_frame(frame: pd.DataFrame, source_path: str | Path = "<memor
     return out.dropna(subset=["timestamp", "yes_price"])
 
 
-def construct_yes_equivalent_price(frame: pd.DataFrame) -> tuple[pd.Series | None, str | None, str]:
+def deduplicate_normalized_trades(trades: pd.DataFrame) -> pd.DataFrame:
+    """Deduplicate with stable trade IDs when present, else a conservative trade tuple."""
+
+    if trades.empty:
+        return trades
+    with_ids = trades[
+        trades.get("trade_id", pd.Series(pd.NA, index=trades.index)).notna()
+        & (trades.get("trade_id", pd.Series("", index=trades.index)).astype(str) != "<NA>")
+    ]
+    without_ids = trades.drop(with_ids.index)
+    deduped_parts: list[pd.DataFrame] = []
+    if not with_ids.empty:
+        deduped_parts.append(with_ids.drop_duplicates(subset=["source_path", "trade_id"]))
+    if not without_ids.empty:
+        deduped_parts.append(
+            without_ids.drop_duplicates(subset=["market_id", "timestamp", "yes_price", "size"])
+        )
+    if not deduped_parts:
+        return trades.iloc[0:0].copy()
+    return pd.concat(deduped_parts, ignore_index=True)
+
+
+def construct_yes_equivalent_price(
+    frame: pd.DataFrame,
+) -> tuple[pd.Series | None, str | None, str, bool]:
     columns = list(frame.columns)
     yes_col = choose_column(columns, exact=("yes_price", "yes_vwap", "yes_trade_price"))
     no_col = choose_column(columns, exact=("no_price", "no_trade_price"))
@@ -278,21 +346,25 @@ def construct_yes_equivalent_price(frame: pd.DataFrame) -> tuple[pd.Series | Non
             pd.to_numeric(frame[yes_col], errors="coerce"),
             yes_col,
             "YES-equivalent price from YES price column.",
+            True,
         )
     if no_col is not None:
         no_price = normalize_probability_price(pd.to_numeric(frame[no_col], errors="coerce"))
-        return 1.0 - no_price, no_col, "YES-equivalent price inferred as 1 - NO price."
+        return 1.0 - no_price, no_col, "YES-equivalent price inferred as 1 - NO price.", True
 
     single_col = choose_column(
         columns,
-        exact=("price", "trade_price", "exec_price", "last_price", "final_outcome_price"),
+        exact=("price", "trade_price", "exec_price", "last_price"),
         contains=("price",),
     )
+    if single_col == "final_outcome_price":
+        single_col = None
     if single_col is not None:
         return (
             pd.to_numeric(frame[single_col], errors="coerce"),
             single_col,
             "Single observed price used as YES-equivalent proxy; outcome orientation is unverified.",
+            False,
         )
 
     midpoint = construct_midpoint_proxy(frame)
@@ -301,8 +373,9 @@ def construct_yes_equivalent_price(frame: pd.DataFrame) -> tuple[pd.Series | Non
             midpoint,
             "bid/ask midpoint",
             "Bid/ask midpoint used as YES-equivalent proxy; no trade price was present.",
+            False,
         )
-    return None, None, ""
+    return None, None, "", False
 
 
 def construct_midpoint_proxy(frame: pd.DataFrame) -> pd.Series | None:
@@ -350,7 +423,15 @@ def normalize_metadata_frame(frame: pd.DataFrame, source_path: str | Path = "<me
     result_col = choose_column(columns, exact=("result", "outcome", "outcome_label"))
     close_col = choose_column(
         columns,
-        exact=("close_time", "end_date", "expiration_time", "expiry", "expiration"),
+        exact=(
+            "close_time",
+            "resolution_time",
+            "resolved_time",
+            "end_date",
+            "expiration_time",
+            "expiry",
+            "expiration",
+        ),
     )
     open_col = choose_column(columns, exact=("open_time", "created_time", "created_at"))
 
@@ -435,11 +516,59 @@ def normalize_event_jump_frame(frame: pd.DataFrame, source_path: str | Path = "<
             "threshold_5c": move.abs() >= 0.05,
             "threshold_10c": move.abs() >= 0.10,
             "threshold_20c": move.abs() >= 0.20,
+            "max_threshold_met": move.abs().map(_max_threshold_met),
+            "orientation_verified": True,
             "source": str(source_path),
             "notional": pd.to_numeric(frame[notional_col], errors="coerce") if notional_col else np.nan,
         }
     )
     return out.dropna(subset=["jump_size"])
+
+
+def label_near_resolution_jumps(
+    jumps: pd.DataFrame,
+    metadata: pd.DataFrame,
+    near_resolution_window: str = "24h",
+) -> pd.DataFrame:
+    if jumps.empty:
+        labeled = jumps.copy()
+        if "near_resolution" not in labeled:
+            labeled["near_resolution"] = False
+        return labeled
+
+    labeled = jumps.copy()
+    labeled["near_resolution_window"] = near_resolution_window
+    labeled["near_resolution"] = False
+    labeled["market_close_time"] = pd.NaT
+    if metadata.empty or "close_time" not in metadata or "market_id" not in metadata:
+        return labeled
+
+    close_times = metadata[["market_id", "close_time"]].dropna(subset=["close_time"]).copy()
+    if close_times.empty:
+        return labeled
+    close_times["market_id"] = close_times["market_id"].astype(str)
+    close_times["market_close_time"] = pd.to_datetime(
+        close_times["close_time"],
+        errors="coerce",
+        utc=True,
+    )
+    close_times = close_times.dropna(subset=["market_close_time"]).drop_duplicates(
+        subset=["market_id"],
+        keep="first",
+    )
+    labeled = labeled.drop(columns=["market_close_time"])
+    labeled["market_id"] = labeled["market_id"].astype(str)
+    labeled = labeled.merge(
+        close_times[["market_id", "market_close_time"]],
+        on="market_id",
+        how="left",
+    )
+
+    window = pd.to_timedelta(near_resolution_window)
+    timestamps = pd.to_datetime(labeled["timestamp"], errors="coerce", utc=True)
+    close = pd.to_datetime(labeled["market_close_time"], errors="coerce", utc=True)
+    labeled["near_resolution"] = (close.notna()) & (timestamps >= (close - window))
+    return labeled
 
 
 def build_price_paths(trades: pd.DataFrame, rolling_window: int = 20) -> pd.DataFrame:
@@ -471,6 +600,8 @@ def build_price_paths(trades: pd.DataFrame, rolling_window: int = 20) -> pd.Data
         "notional",
         "side",
         "price_assumption",
+        "orientation_verified",
+        "trade_id",
     ]
     if "midpoint_proxy" in paths:
         keep.append("midpoint_proxy")
@@ -488,11 +619,15 @@ def detect_jump_windows(
                 "market_id",
                 "timestamp",
                 "window",
-                "threshold",
+                "max_threshold_met",
                 "jump_size",
                 "direction",
                 "price_before",
                 "price_after",
+                "threshold_5c",
+                "threshold_10c",
+                "threshold_20c",
+                "orientation_verified",
             ]
         )
     required = {"market_id", "timestamp", "last_trade_price"}
@@ -505,8 +640,11 @@ def detect_jump_windows(
     rows: list[dict[str, Any]] = []
 
     for market_id, group in price_paths.groupby("market_id", sort=False):
+        series_columns = ["timestamp", "last_trade_price"]
+        if "orientation_verified" in group:
+            series_columns.append("orientation_verified")
         series = (
-            group[["timestamp", "last_trade_price"]]
+            group[series_columns]
             .dropna()
             .sort_values("timestamp")
             .drop_duplicates(subset=["timestamp"], keep="last")
@@ -526,20 +664,26 @@ def detect_jump_windows(
             price_before = np.where(up_move >= down_move, prior_min, prior_max)
             hits = jump_size[jump_size >= min_threshold].dropna()
             for timestamp, size in hits.items():
-                for threshold in threshold_values:
-                    if size >= threshold:
-                        rows.append(
-                            {
-                                "market_id": market_id,
-                                "timestamp": timestamp,
-                                "window": window,
-                                "threshold": threshold,
-                                "jump_size": float(size),
-                                "direction": str(direction[prices.index.get_loc(timestamp)]),
-                                "price_before": float(price_before[prices.index.get_loc(timestamp)]),
-                                "price_after": float(prices.loc[timestamp]),
-                            }
-                        )
+                idx = prices.index.get_loc(timestamp)
+                thresholds_met = [threshold for threshold in threshold_values if size >= threshold]
+                row = {
+                    "market_id": market_id,
+                    "timestamp": timestamp,
+                    "window": window,
+                    "max_threshold_met": max(thresholds_met),
+                    "jump_size": float(size),
+                    "direction": str(direction[idx]),
+                    "price_before": float(price_before[idx]),
+                    "price_after": float(prices.loc[timestamp]),
+                    "threshold_5c": bool(size >= 0.05),
+                    "threshold_10c": bool(size >= 0.10),
+                    "threshold_20c": bool(size >= 0.20),
+                }
+                if "orientation_verified" in series:
+                    row["orientation_verified"] = bool(series.loc[timestamp, "orientation_verified"])
+                else:
+                    row["orientation_verified"] = True
+                rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -550,7 +694,7 @@ def build_jump_size_distribution(
     frames: list[pd.DataFrame] = []
     if not jump_windows.empty:
         detected = (
-            jump_windows.sort_values("threshold")
+            jump_windows.sort_values(["market_id", "timestamp", "window", "jump_size"])
             .drop_duplicates(subset=["market_id", "timestamp", "window"])
             .copy()
         )
@@ -558,33 +702,52 @@ def build_jump_size_distribution(
         detected["threshold_5c"] = detected["jump_size"] >= 0.05
         detected["threshold_10c"] = detected["jump_size"] >= 0.10
         detected["threshold_20c"] = detected["jump_size"] >= 0.20
+        if "orientation_verified" not in detected:
+            detected["orientation_verified"] = False
+        if "near_resolution" not in detected:
+            detected["near_resolution"] = False
+        if "max_threshold_met" not in detected:
+            detected["max_threshold_met"] = detected["jump_size"].map(_max_threshold_met)
         frames.append(
             detected[
                 [
                     "market_id",
                     "timestamp",
                     "window",
+                    "max_threshold_met",
                     "jump_size",
                     "direction",
                     "threshold_5c",
                     "threshold_10c",
                     "threshold_20c",
+                    "near_resolution",
+                    "orientation_verified",
                     "source",
                 ]
             ]
         )
     if event_jumps is not None and not event_jumps.empty:
+        event_jumps = event_jumps.copy()
+        if "near_resolution" not in event_jumps:
+            event_jumps["near_resolution"] = False
+        if "orientation_verified" not in event_jumps:
+            event_jumps["orientation_verified"] = True
+        if "max_threshold_met" not in event_jumps:
+            event_jumps["max_threshold_met"] = event_jumps["jump_size"].map(_max_threshold_met)
         frames.append(
             event_jumps[
                 [
                     "market_id",
                     "timestamp",
                     "window",
+                    "max_threshold_met",
                     "jump_size",
                     "direction",
                     "threshold_5c",
                     "threshold_10c",
                     "threshold_20c",
+                    "near_resolution",
+                    "orientation_verified",
                     "source",
                 ]
             ]
@@ -595,11 +758,14 @@ def build_jump_size_distribution(
                 "market_id",
                 "timestamp",
                 "window",
+                "max_threshold_met",
                 "jump_size",
                 "direction",
                 "threshold_5c",
                 "threshold_10c",
                 "threshold_20c",
+                "near_resolution",
+                "orientation_verified",
                 "source",
             ]
         )
@@ -685,20 +851,24 @@ def build_simulator_parameter_suggestions(
     trades: pd.DataFrame,
     price_paths: pd.DataFrame,
     jump_size_distribution: pd.DataFrame,
+    interim_jump_size_distribution: pd.DataFrame,
+    terminal_jump_size_distribution: pd.DataFrame,
     metadata: pd.DataFrame,
     trade_paths: Iterable[Path],
     metadata_paths: Iterable[Path],
     event_paths: Iterable[Path],
     max_rows_per_file: int,
+    near_resolution_window: str,
 ) -> dict[str, Any]:
-    price_quantiles = _quantile_dict(trades["yes_price"], [0.10, 0.25, 0.50, 0.75, 0.90])
-    size_quantiles = _quantile_dict(trades["size"], [0.50, 0.75, 0.90, 0.95, 0.99])
-    notional_quantiles = _quantile_dict(trades["notional"], [0.50, 0.75, 0.90, 0.95, 0.99])
+    verified_trades = trades[_verified_orientation_mask(trades)].copy()
+    unverified_count = int(len(trades) - len(verified_trades))
+    verified_count = int(len(verified_trades))
 
-    jumps = pd.to_numeric(jump_size_distribution.get("jump_size"), errors="coerce").dropna()
-    jump_quantiles = _quantile_dict(jumps, [0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99])
-    if not jump_size_distribution.empty and "direction" in jump_size_distribution:
-        direction = jump_size_distribution["direction"].astype(str).str.lower()
+    verified_interim_jumps = interim_jump_size_distribution[
+        _verified_orientation_mask(interim_jump_size_distribution)
+    ].copy()
+    if not verified_interim_jumps.empty and "direction" in verified_interim_jumps:
+        direction = verified_interim_jumps["direction"].astype(str).str.lower()
         adverse_proxy = float(direction.isin({"down", "-1", "sell", "no"}).mean())
     else:
         adverse_proxy = None
@@ -715,29 +885,44 @@ def build_simulator_parameter_suggestions(
             "metadata_files": [str(path) for path in metadata_paths],
             "event_files": [str(path) for path in event_paths],
             "max_rows_per_file": max_rows_per_file,
+            "near_resolution_window": near_resolution_window,
+            "raw_normalized_trade_rows": int(trades.attrs.get("raw_normalized_rows", len(trades))),
+            "deduplicated_rows_removed": int(
+                trades.attrs.get("deduplicated_rows_removed", 0)
+            ),
             "normalized_trade_rows": int(len(trades)),
+            "verified_orientation_trade_count": verified_count,
+            "unverified_orientation_trade_count": unverified_count,
             "price_path_rows": int(len(price_paths)),
             "detected_jump_rows": int(len(jump_size_distribution)),
+            "interim_jump_rows": int(len(interim_jump_size_distribution)),
+            "terminal_jump_rows": int(len(terminal_jump_size_distribution)),
         },
-        "initial_price_candidates": price_quantiles,
-        "jump_size_min_candidates": {
-            "p05": jump_quantiles.get("p05"),
-            "p10": jump_quantiles.get("p10"),
-            "p25": jump_quantiles.get("p25"),
-        },
-        "jump_size_max_candidates": {
-            "p75": jump_quantiles.get("p75"),
-            "p90": jump_quantiles.get("p90"),
-            "p95": jump_quantiles.get("p95"),
-            "p99": jump_quantiles.get("p99"),
-        },
-        "adverse_jump_probability_proxy": adverse_proxy,
-        "quantity_liquidation_size_ranges": size_quantiles,
-        "notional_volume_distribution": notional_quantiles,
-        "market_activity_distribution": _quantile_dict(
-            trades.groupby("market_id")["yes_price"].count(),
-            [0.25, 0.50, 0.75, 0.90, 0.95, 0.99],
+        "unverified_orientation_share": (
+            None if len(trades) == 0 else float(unverified_count / len(trades))
         ),
+        "verified_orientation_trade_count": verified_count,
+        "unverified_orientation_trade_count": unverified_count,
+        "all_row_suggestions": _trade_based_suggestion_block(trades),
+        "verified_orientation_only_suggestions": _trade_based_suggestion_block(verified_trades),
+        "initial_price_candidates": _quantile_dict(
+            verified_trades["yes_price"] if not verified_trades.empty else pd.Series(dtype=float),
+            [0.10, 0.25, 0.50, 0.75, 0.90],
+        ),
+        "jump_size_interim_candidates": _jump_candidate_block(interim_jump_size_distribution),
+        "jump_size_unfiltered_candidates": _jump_candidate_block(jump_size_distribution),
+        "terminal_jump_size_candidates": _jump_candidate_block(terminal_jump_size_distribution),
+        "jump_candidate_usage_note": (
+            "Use jump_size_interim_candidates for public interim jump simulation. "
+            "Unfiltered and terminal candidates include near-resolution/final-settlement moves "
+            "and should not be used as generic public-jump max parameters."
+        ),
+        "adverse_jump_probability_proxy": adverse_proxy,
+        "taker_trade_size_quantiles": _quantile_dict(
+            trades["size"],
+            [0.50, 0.75, 0.90, 0.95, 0.99],
+        ),
+        "liquidation_size_status": "unknown_from_trades_alone",
         "category_distribution": category_distribution,
         "public_private_jump_share": {
             "public_jump_share": None,
@@ -748,9 +933,60 @@ def build_simulator_parameter_suggestions(
             "Calibration uses trades, market metadata, and coarse event labels only.",
             "Cannot prove true stale-quote races without order add/cancel/modify/fill sequencing.",
             "Liquidation exit curves from trades are proxies, not displayed-book executable curves.",
+            "Trade-size quantiles are taker-trade observations and are not liquidation-size estimates.",
+            "Orientation-unverified rows are separated from verified-orientation suggestions.",
+            "Near-resolution moves are labeled separately from interim jumps.",
             "Large parquet glob inputs are represented by first/middle/last samples unless explicit files are provided.",
         ],
     }
+
+
+def _trade_based_suggestion_block(trades: pd.DataFrame) -> dict[str, Any]:
+    if trades.empty:
+        empty = pd.Series(dtype=float)
+        return {
+            "initial_price_candidates": _quantile_dict(empty, [0.10, 0.25, 0.50, 0.75, 0.90]),
+            "taker_trade_size_quantiles": _quantile_dict(empty, [0.50, 0.75, 0.90, 0.95, 0.99]),
+            "notional_volume_distribution": _quantile_dict(empty, [0.50, 0.75, 0.90, 0.95, 0.99]),
+            "market_activity_distribution": _quantile_dict(
+                empty,
+                [0.25, 0.50, 0.75, 0.90, 0.95, 0.99],
+            ),
+        }
+    return {
+        "initial_price_candidates": _quantile_dict(
+            trades["yes_price"],
+            [0.10, 0.25, 0.50, 0.75, 0.90],
+        ),
+        "taker_trade_size_quantiles": _quantile_dict(
+            trades["size"],
+            [0.50, 0.75, 0.90, 0.95, 0.99],
+        ),
+        "notional_volume_distribution": _quantile_dict(
+            trades["notional"],
+            [0.50, 0.75, 0.90, 0.95, 0.99],
+        ),
+        "market_activity_distribution": _quantile_dict(
+            trades.groupby("market_id")["yes_price"].count(),
+            [0.25, 0.50, 0.75, 0.90, 0.95, 0.99],
+        ),
+    }
+
+
+def _jump_candidate_block(jumps: pd.DataFrame) -> dict[str, float | None]:
+    quantiles = [0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99]
+    if "jump_size" not in jumps:
+        return _quantile_dict(pd.Series(dtype=float), quantiles)
+    return _quantile_dict(
+        pd.to_numeric(jumps["jump_size"], errors="coerce").dropna(),
+        quantiles,
+    )
+
+
+def _verified_orientation_mask(frame: pd.DataFrame) -> pd.Series:
+    if "orientation_verified" not in frame:
+        return pd.Series(False, index=frame.index)
+    return frame["orientation_verified"].fillna(False).astype(bool)
 
 
 def write_calibration_plots(
@@ -849,9 +1085,8 @@ def choose_market_identifier_column(columns: Iterable[str]) -> str | None:
 
 def normalize_probability_price(values: pd.Series) -> pd.Series:
     numeric = pd.to_numeric(values, errors="coerce").astype(float)
-    finite = numeric.dropna()
-    if not finite.empty and finite.abs().quantile(0.95) > 1.5:
-        numeric = numeric / 100.0
+    cent_mask = numeric.abs() > 1.5
+    numeric = numeric.where(~cent_mask, numeric / 100.0)
     return numeric.clip(lower=0.0, upper=1.0)
 
 
@@ -934,6 +1169,18 @@ def _quantile_dict(values: pd.Series, quantiles: Iterable[float]) -> dict[str, f
         return {f"p{int(q * 100):02d}": None for q in quantiles}
     result = numeric.quantile(list(quantiles))
     return {f"p{int(q * 100):02d}": float(result.loc[q]) for q in quantiles}
+
+
+def _max_threshold_met(value: float) -> float | None:
+    if pd.isna(value):
+        return None
+    if value >= 0.20:
+        return 0.20
+    if value >= 0.10:
+        return 0.10
+    if value >= 0.05:
+        return 0.05
+    return None
 
 
 def _natural_key(path: Path) -> list[Any]:

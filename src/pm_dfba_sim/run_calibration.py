@@ -71,6 +71,14 @@ def main() -> None:
         default=None,
         help="Jump-detection window such as 5min, 15min, or 1h. May be repeated.",
     )
+    parser.add_argument(
+        "--near-resolution-window",
+        default="24h",
+        help=(
+            "Label jumps at or after market close minus this window as near-resolution, "
+            "for example 24h, 6h, or 1h."
+        ),
+    )
     args = parser.parse_args()
 
     try:
@@ -83,6 +91,7 @@ def main() -> None:
             max_rows_per_file=args.max_rows_per_file,
             max_files_per_glob=args.max_files_per_glob,
             windows=args.window or ("5min", "15min", "1h"),
+            near_resolution_window=args.near_resolution_window,
         )
     except CalibrationError as exc:
         raise SystemExit(f"Calibration failed: {exc}") from exc
