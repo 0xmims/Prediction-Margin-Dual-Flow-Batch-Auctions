@@ -104,7 +104,11 @@ def stale_quote_loss(
     if venue == VenueType.DFBA:
         return base_loss * config.dfba_stale_loss_multiplier
     if venue == VenueType.PM_DFBA:
-        if event.public_jump and event.jump_size >= config.volatility_call_threshold:
+        if (
+            config.volatility_call_enabled
+            and event.public_jump
+            and event.jump_size >= config.volatility_call_threshold
+        ):
             return base_loss * config.pm_dfba_public_stale_loss_multiplier
         return base_loss * config.pm_dfba_private_stale_loss_multiplier
 
@@ -151,6 +155,14 @@ def liquidation_slippage_multiplier(venue: VenueType, config: MarketConfig) -> f
 def sell_collar_breached(executable_price: float, collar_price: float) -> bool:
     """A sell collar rejects worse prices; it does not create a fill at the collar."""
     return executable_price < collar_price
+
+
+def implied_clob_race_probability(maker_latency_mean_ms: float, taker_latency_mean_ms: float) -> float:
+    """For exponential latencies, return P(taker hits stale quote before maker cancels)."""
+    total = maker_latency_mean_ms + taker_latency_mean_ms
+    if total <= 0:
+        return 0.0
+    return maker_latency_mean_ms / total
 
 
 def execute_liquidation(
@@ -251,16 +263,44 @@ def _collared_primary_sell_quantity(
         return 0.0
 
     full_quantity = min(requested_quantity, depth)
-    full_price = _liquidation_price_for_quantity(full_quantity, depth, venue, event, config)
-    if not sell_collar_breached(full_price, collar_price):
+    full_collar_check_price = _collar_check_price_for_quantity(
+        full_quantity,
+        depth,
+        venue,
+        event,
+        config,
+    )
+    if not sell_collar_breached(full_collar_check_price, collar_price):
         return full_quantity
 
-    slippage_unit = event.jump_size * liquidation_slippage_multiplier(venue, config) * 0.5
+    if config.collar_mode == "vwap":
+        slippage_unit = event.jump_size * liquidation_slippage_multiplier(venue, config) * 0.5
+    elif config.collar_mode == "marginal":
+        slippage_unit = event.jump_size * liquidation_slippage_multiplier(venue, config)
+    else:
+        raise ValueError(f"unsupported collar_mode: {config.collar_mode}")
+
     if slippage_unit <= 0:
         return full_quantity if event.p_post >= collar_price else 0.0
 
     max_depth_ratio = max(0.0, (event.p_post - collar_price) / slippage_unit)
     return min(full_quantity, max_depth_ratio * depth)
+
+
+def _collar_check_price_for_quantity(
+    quantity: float,
+    depth: float,
+    venue: VenueType,
+    event: ProbabilityJump,
+    config: MarketConfig,
+) -> float:
+    if config.collar_mode == "vwap":
+        return _liquidation_price_for_quantity(quantity, depth, venue, event, config)
+    if config.collar_mode == "marginal":
+        depth_ratio = quantity / max(depth, 1e-9)
+        slippage = event.jump_size * liquidation_slippage_multiplier(venue, config) * depth_ratio
+        return float(np.clip(event.p_post - slippage, 0.0, 1.0))
+    raise ValueError(f"unsupported collar_mode: {config.collar_mode}")
 
 
 def taker_delay_cost(venue: VenueType, event: ProbabilityJump, config: MarketConfig) -> float:
@@ -270,6 +310,11 @@ def taker_delay_cost(venue: VenueType, event: ProbabilityJump, config: MarketCon
         delay_ms = 0.0
     else:
         delay_ms = config.batch_interval_ms
-        if venue == VenueType.PM_DFBA and event.public_jump and event.jump_size >= config.volatility_call_threshold:
+        if (
+            venue == VenueType.PM_DFBA
+            and config.volatility_call_enabled
+            and event.public_jump
+            and event.jump_size >= config.volatility_call_threshold
+        ):
             delay_ms *= 1.5
     return event.jump_size * config.quantity * (delay_ms / 1000.0) * 0.01

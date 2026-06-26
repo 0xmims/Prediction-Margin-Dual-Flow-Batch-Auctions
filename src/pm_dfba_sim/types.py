@@ -96,15 +96,23 @@ class MarketConfig:
     fba_liquidation_slippage_multiplier: float
     dfba_liquidation_slippage_multiplier: float
     pm_dfba_liquidation_slippage_multiplier: float
+    volatility_call_enabled: bool = True
     liquidation_collar_buffer: float = 0.05
+    collar_mode: str = "vwap"
     public_jump_share_sweep: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75, 1.0)
     private_jump_share_sweep: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75, 1.0)
     terminal_jump_probability_sweep: tuple[float, ...] = (0.0, 0.01, 0.05, 0.10, 0.25)
     batch_interval_ms_sweep: tuple[float, ...] = (50.0, 100.0, 250.0, 500.0, 1000.0, 5000.0)
     backstop_depth_share_sweep: tuple[float, ...] = (0.0, 0.10, 0.25, 0.50, 1.0)
+    maker_latency_mean_ms_sweep: tuple[float, ...] = (10.0, 20.0, 50.0, 100.0, 250.0)
+    taker_latency_mean_ms_sweep: tuple[float, ...] = (10.0, 20.0, 50.0, 100.0, 250.0)
     toxic_flow_public_stale_loss_multiplier: float = 0.80
     toxic_flow_private_stale_loss_multiplier: float = 0.95
     toxic_flow_liquidation_slippage_multiplier: float = 1.10
+
+    def __post_init__(self) -> None:
+        if self.collar_mode not in {"vwap", "marginal"}:
+            raise ValueError("collar_mode must be either 'vwap' or 'marginal'")
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MarketConfig":
@@ -121,6 +129,8 @@ class MarketConfig:
             "terminal_jump_probability_sweep",
             "batch_interval_ms_sweep",
             "backstop_depth_share_sweep",
+            "maker_latency_mean_ms_sweep",
+            "taker_latency_mean_ms_sweep",
         }
         for field_name in tuple_fields:
             if field_name in normalized:
@@ -148,7 +158,7 @@ class TrialResult:
     liquidation_used_backstop_depth: float
     liquidation_shortfall: float
     bad_debt: float
-    maker_loss: float
+    maker_loss_placeholder: float
     effective_liquidation_depth: float
     taker_delay_cost: float
 

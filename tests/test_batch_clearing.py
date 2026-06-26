@@ -122,3 +122,39 @@ def test_pm_dfba_liquidation_partially_fills_primary_depth_up_to_collar():
     assert execution.unfilled_quantity == pytest.approx(950)
     assert execution.collar_breached
     assert execution.used_backstop_depth == 0
+
+
+def test_pm_dfba_marginal_collar_mode_is_stricter_than_vwap_mode():
+    base_config = replace(
+        load_config("configs/baseline.json"),
+        quantity=1000,
+        base_liquidation_depth=100,
+        pm_dfba_depth_multiplier=1.0,
+        backstop_depth_multiplier=0.0,
+        pm_dfba_liquidation_slippage_multiplier=1.0,
+        liquidation_collar_buffer=0.05,
+    )
+    event = ProbabilityJump(
+        p0=0.60,
+        p_post=0.40,
+        jump_size=0.20,
+        public_jump=True,
+        private_jump=False,
+        terminal_jump=False,
+        adverse_jump=True,
+    )
+
+    vwap_execution = execute_liquidation(
+        VenueType.PM_DFBA,
+        event,
+        replace(base_config, collar_mode="vwap"),
+    )
+    marginal_execution = execute_liquidation(
+        VenueType.PM_DFBA,
+        event,
+        replace(base_config, collar_mode="marginal"),
+    )
+
+    assert vwap_execution.executed_quantity == pytest.approx(50)
+    assert marginal_execution.executed_quantity == pytest.approx(25)
+    assert marginal_execution.executed_quantity < vwap_execution.executed_quantity

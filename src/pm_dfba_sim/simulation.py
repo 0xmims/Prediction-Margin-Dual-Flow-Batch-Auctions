@@ -105,7 +105,7 @@ def simulate_venue_trial(
         liquidation_used_backstop_depth=execution.used_backstop_depth,
         liquidation_shortfall=shortfall,
         bad_debt=bad_debt,
-        maker_loss=stale_loss,
+        maker_loss_placeholder=stale_loss,
         effective_liquidation_depth=effective_liquidation_depth(venue, config),
         taker_delay_cost=taker_delay_cost(venue, event, config),
     )

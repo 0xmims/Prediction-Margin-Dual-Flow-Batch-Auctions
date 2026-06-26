@@ -11,6 +11,7 @@ from pm_dfba_sim.metrics import expected_shortfall
 from pm_dfba_sim.probability import generate_probability_jump
 from pm_dfba_sim.simulation import simulate_venue_trial
 from pm_dfba_sim.types import MarketConfig, VenueType
+from pm_dfba_sim.venues import implied_clob_race_probability
 
 
 class AblationMode(str, Enum):
@@ -19,10 +20,15 @@ class AblationMode(str, Enum):
     DFBA = "DFBA"
     PM_DFBA_FULL = "PM_DFBA_FULL"
     PM_DFBA_NO_VOL_CALL = "PM_DFBA_NO_VOL_CALL"
-    PM_DFBA_NO_BACKSTOP = "PM_DFBA_NO_BACKSTOP"
+    PM_DFBA_NO_BACKSTOP_ONLY = "PM_DFBA_NO_BACKSTOP_ONLY"
     PM_DFBA_NO_MAKER_TAKER_SEGREGATION = "PM_DFBA_NO_MAKER_TAKER_SEGREGATION"
-    PM_DFBA_TOXIC_FLOW_MISCLASSIFICATION = "PM_DFBA_TOXIC_FLOW_MISCLASSIFICATION"
+    PM_DFBA_TOXIC_ONLY = "PM_DFBA_TOXIC_ONLY"
+    PM_DFBA_TOXIC_WITH_BACKSTOP = "PM_DFBA_TOXIC_WITH_BACKSTOP"
+    PM_DFBA_ADVERSE_DEPTH_ONLY = "PM_DFBA_ADVERSE_DEPTH_ONLY"
+    PM_DFBA_ADVERSE_STACK = "PM_DFBA_ADVERSE_STACK"
     TERMINAL_JUMP_STRESS = "TERMINAL_JUMP_STRESS"
+    PM_DFBA_NO_BACKSTOP = "PM_DFBA_NO_BACKSTOP_ONLY"
+    PM_DFBA_TOXIC_FLOW_MISCLASSIFICATION = "PM_DFBA_ADVERSE_STACK"
 
 
 @dataclass(frozen=True)
@@ -33,19 +39,34 @@ class ScenarioSpec:
     description: str
 
 
-BASELINE_MODES = tuple(AblationMode)
+BASELINE_MODES = (
+    AblationMode.CLOB,
+    AblationMode.FBA,
+    AblationMode.DFBA,
+    AblationMode.PM_DFBA_FULL,
+    AblationMode.PM_DFBA_NO_VOL_CALL,
+    AblationMode.PM_DFBA_NO_BACKSTOP_ONLY,
+    AblationMode.PM_DFBA_NO_MAKER_TAKER_SEGREGATION,
+    AblationMode.PM_DFBA_TOXIC_ONLY,
+    AblationMode.PM_DFBA_TOXIC_WITH_BACKSTOP,
+    AblationMode.PM_DFBA_ADVERSE_DEPTH_ONLY,
+    AblationMode.PM_DFBA_ADVERSE_STACK,
+    AblationMode.TERMINAL_JUMP_STRESS,
+)
 PUBLIC_SWEEP_MODES = (
     AblationMode.CLOB,
     AblationMode.FBA,
     AblationMode.DFBA,
     AblationMode.PM_DFBA_FULL,
     AblationMode.PM_DFBA_NO_VOL_CALL,
-    AblationMode.PM_DFBA_TOXIC_FLOW_MISCLASSIFICATION,
+    AblationMode.PM_DFBA_TOXIC_ONLY,
+    AblationMode.PM_DFBA_ADVERSE_STACK,
 )
 PRIVATE_SWEEP_MODES = (
     AblationMode.CLOB,
     AblationMode.PM_DFBA_FULL,
-    AblationMode.PM_DFBA_TOXIC_FLOW_MISCLASSIFICATION,
+    AblationMode.PM_DFBA_TOXIC_ONLY,
+    AblationMode.PM_DFBA_ADVERSE_STACK,
 )
 TERMINAL_SWEEP_MODES = (
     AblationMode.CLOB,
@@ -59,6 +80,10 @@ BATCH_SWEEP_MODES = (
     AblationMode.DFBA,
     AblationMode.PM_DFBA_FULL,
     AblationMode.PM_DFBA_NO_VOL_CALL,
+)
+LATENCY_SWEEP_MODES = (
+    AblationMode.CLOB,
+    AblationMode.PM_DFBA_FULL,
 )
 
 
@@ -81,12 +106,13 @@ def scenario_spec(base_config: MarketConfig, mode: AblationMode) -> ScenarioSpec
     elif mode == AblationMode.PM_DFBA_NO_VOL_CALL:
         config = replace(
             config,
+            volatility_call_enabled=False,
             pm_dfba_public_stale_loss_multiplier=config.pm_dfba_private_stale_loss_multiplier,
         )
-        description = "PM-DFBA with public-jump volatility-call protection removed."
-    elif mode == AblationMode.PM_DFBA_NO_BACKSTOP:
+        description = "PM-DFBA with public-jump volatility-call stale-loss benefit and delay cost removed."
+    elif mode in {AblationMode.PM_DFBA_NO_BACKSTOP_ONLY, AblationMode.PM_DFBA_NO_BACKSTOP}:
         config = replace(config, backstop_depth_multiplier=0.0)
-        description = "PM-DFBA with committed backstop depth removed."
+        description = "PM-DFBA with only committed backstop depth removed."
     elif mode == AblationMode.PM_DFBA_NO_MAKER_TAKER_SEGREGATION:
         config = replace(
             config,
@@ -96,7 +122,47 @@ def scenario_spec(base_config: MarketConfig, mode: AblationMode) -> ScenarioSpec
             pm_dfba_liquidation_slippage_multiplier=config.fba_liquidation_slippage_multiplier,
         )
         description = "PM-DFBA with maker/taker segregation weakened to FBA-like assumptions."
-    elif mode == AblationMode.PM_DFBA_TOXIC_FLOW_MISCLASSIFICATION:
+    elif mode == AblationMode.PM_DFBA_TOXIC_ONLY:
+        config = replace(
+            config,
+            pm_dfba_public_stale_loss_multiplier=(
+                config.toxic_flow_public_stale_loss_multiplier
+            ),
+            pm_dfba_private_stale_loss_multiplier=(
+                config.toxic_flow_private_stale_loss_multiplier
+            ),
+        )
+        description = "PM-DFBA with only toxic-flow stale-loss classification degraded."
+    elif mode == AblationMode.PM_DFBA_TOXIC_WITH_BACKSTOP:
+        config = replace(
+            config,
+            pm_dfba_depth_multiplier=config.clob_depth_multiplier,
+            pm_dfba_public_stale_loss_multiplier=(
+                config.toxic_flow_public_stale_loss_multiplier
+            ),
+            pm_dfba_private_stale_loss_multiplier=(
+                config.toxic_flow_private_stale_loss_multiplier
+            ),
+            pm_dfba_liquidation_slippage_multiplier=(
+                config.toxic_flow_liquidation_slippage_multiplier
+                * config.clob_liquidation_slippage_multiplier
+            ),
+        )
+        description = "PM-DFBA toxic-flow plus adverse depth stress, with backstop retained."
+    elif mode == AblationMode.PM_DFBA_ADVERSE_DEPTH_ONLY:
+        config = replace(
+            config,
+            pm_dfba_depth_multiplier=config.clob_depth_multiplier,
+            pm_dfba_liquidation_slippage_multiplier=(
+                config.toxic_flow_liquidation_slippage_multiplier
+                * config.clob_liquidation_slippage_multiplier
+            ),
+        )
+        description = "PM-DFBA with only primary depth/slippage weakened; stale protection and backstop remain."
+    elif mode in {
+        AblationMode.PM_DFBA_ADVERSE_STACK,
+        AblationMode.PM_DFBA_TOXIC_FLOW_MISCLASSIFICATION,
+    }:
         config = replace(
             config,
             pm_dfba_depth_multiplier=config.clob_depth_multiplier,
@@ -112,7 +178,7 @@ def scenario_spec(base_config: MarketConfig, mode: AblationMode) -> ScenarioSpec
                 * config.clob_liquidation_slippage_multiplier
             ),
         )
-        description = "PM-DFBA stress case where toxic flow is misclassified and backstop is absent."
+        description = "PM-DFBA combined worst case: toxic classification, adverse depth/slippage, and no backstop."
     elif mode == AblationMode.TERMINAL_JUMP_STRESS:
         config = replace(config, terminal_jump_probability=max(config.terminal_jump_probability, 0.25))
         description = "PM-DFBA under elevated terminal instant-resolution jump probability."
@@ -146,6 +212,9 @@ def simulate_mode(base_config: MarketConfig, mode: AblationMode) -> pd.DataFrame
             row["mode"] = spec.mode.value
             row["scenario_description"] = spec.description
             row["private_jump"] = (not result.public_jump) and (not result.terminal_jump)
+            row["maker_latency_ms"] = maker_latency_ms
+            row["taker_latency_ms"] = taker_latency_ms
+            row["clob_race"] = taker_latency_ms < maker_latency_ms
             rows.append(row)
 
     return pd.DataFrame(rows)
@@ -173,7 +242,9 @@ def summarize_trial_frame(trials: pd.DataFrame, group_cols: tuple[str, ...] = ()
                 "liquidation_shortfall_mean": float(group["liquidation_shortfall"].mean()),
                 "stale_quote_loss_mean": float(group["stale_quote_loss"].mean()),
                 "public_stale_quote_loss_mean": float(group["public_stale_quote_loss"].mean()),
-                "maker_loss_mean": float(group["maker_loss"].mean()),
+                "maker_loss_placeholder_mean": float(
+                    group["maker_loss_placeholder"].mean()
+                ),
                 "liquidation_trigger_rate": float(group["liquidation_triggered"].mean()),
                 "effective_liquidation_depth": float(group["effective_liquidation_depth"].mean()),
                 "liquidation_unfilled_quantity_mean": float(
@@ -189,6 +260,7 @@ def summarize_trial_frame(trials: pd.DataFrame, group_cols: tuple[str, ...] = ()
                 "stale_plus_delay_cost_mean": float(
                     group["stale_quote_loss"].mean() + group["taker_delay_cost"].mean()
                 ),
+                "clob_race_probability": float(group["clob_race"].mean()),
             }
         )
         rows.append(row)
@@ -298,6 +370,51 @@ def run_terminal_jump_stress(config: MarketConfig) -> pd.DataFrame:
     )
 
 
+def run_latency_sweep(config: MarketConfig) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+    for maker_latency_mean_ms in config.maker_latency_mean_ms_sweep:
+        for taker_latency_mean_ms in config.taker_latency_mean_ms_sweep:
+            sweep_config = replace(
+                config,
+                terminal_jump_probability=0.0,
+                maker_latency_mean_ms=maker_latency_mean_ms,
+                taker_latency_mean_ms=taker_latency_mean_ms,
+            )
+            race_probability = implied_clob_race_probability(
+                maker_latency_mean_ms,
+                taker_latency_mean_ms,
+            )
+            for mode in LATENCY_SWEEP_MODES:
+                frame = simulate_mode(sweep_config, mode)
+                frame["maker_latency_mean_ms"] = maker_latency_mean_ms
+                frame["taker_latency_mean_ms"] = taker_latency_mean_ms
+                frame["implied_clob_race_probability"] = race_probability
+                frames.append(frame)
+
+    group_cols = (
+        "maker_latency_mean_ms",
+        "taker_latency_mean_ms",
+        "implied_clob_race_probability",
+    )
+    summary = summarize_trial_frame(pd.concat(frames, ignore_index=True), group_cols)
+    return _add_stale_loss_advantage_vs_clob(summary, group_cols)
+
+
+def _add_stale_loss_advantage_vs_clob(
+    summary: pd.DataFrame,
+    group_cols: tuple[str, ...],
+) -> pd.DataFrame:
+    key_cols = list(group_cols) + ["leverage"]
+    clob_stale = summary[summary["mode"] == AblationMode.CLOB.value][
+        key_cols + ["stale_quote_loss_mean"]
+    ].rename(columns={"stale_quote_loss_mean": "clob_stale_quote_loss_mean"})
+    merged = summary.merge(clob_stale, on=key_cols, how="left")
+    merged["stale_loss_advantage_vs_clob"] = (
+        merged["clob_stale_quote_loss_mean"] - merged["stale_quote_loss_mean"]
+    )
+    return merged
+
+
 def run_ablation_suite(config: MarketConfig, out_dir: str | Path) -> dict[str, pd.DataFrame]:
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
@@ -308,12 +425,14 @@ def run_ablation_suite(config: MarketConfig, out_dir: str | Path) -> dict[str, p
     batch_summary = run_batch_interval_sweep(config)
     private_summary = run_private_jump_share_sweep(config)
     terminal_summary = run_terminal_jump_stress(config)
+    latency_summary = run_latency_sweep(config)
 
     ablation_summary.to_csv(out_path / "ablation_summary.csv", index=False)
     safe_public.to_csv(out_path / "safe_leverage_by_public_jump_share.csv", index=False)
     backstop_summary.to_csv(out_path / "bad_debt_by_backstop_depth.csv", index=False)
     batch_summary.to_csv(out_path / "stale_loss_by_batch_interval.csv", index=False)
     terminal_summary.to_csv(out_path / "terminal_jump_stress.csv", index=False)
+    latency_summary.to_csv(out_path / "latency_sweep.csv", index=False)
 
     return {
         "ablation_summary": ablation_summary,
@@ -323,4 +442,5 @@ def run_ablation_suite(config: MarketConfig, out_dir: str | Path) -> dict[str, p
         "stale_loss_by_batch_interval": batch_summary,
         "private_information_stress": private_summary,
         "terminal_jump_stress": terminal_summary,
+        "latency_sweep": latency_summary,
     }
