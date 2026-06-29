@@ -114,6 +114,20 @@ python3 -m pm_dfba_sim.run_paper_figures --out outputs/paper_figures
 
 These PNGs are schematic concept figures, not empirical results. See `docs/paper_figures.md` for the output paths and intended use.
 
+## PMXT Feasibility Probe
+
+Run a bounded probe over one local PMXT v2 parquet file:
+
+```bash
+PYTHONPATH=src python3 -m pm_dfba_sim.run_pmxt_probe \
+  --input /path/to/polymarket_orderbook_hour.parquet \
+  --out outputs/pmxt_probe \
+  --max-rows 200000 \
+  --max-markets 3
+```
+
+The probe writes small derived artifacts under `outputs/pmxt_probe/`. It is feasibility scaffolding for possible L2 event-window replay, not empirical evidence and not proof of true stale-quote races.
+
 ## MVP Limitations
 
 - The MVP is synthetic and parameterized.
