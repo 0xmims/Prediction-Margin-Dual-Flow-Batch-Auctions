@@ -128,6 +128,8 @@ PYTHONPATH=src python3 -m pm_dfba_sim.run_pmxt_probe \
 
 The probe writes small derived artifacts under `outputs/pmxt_probe/`. It is feasibility scaffolding for possible L2 event-window replay, not empirical evidence and not proof of true stale-quote races.
 
+Use `--diagnose-url` with a PMXT URL to check HTTP status, content length, and range-request support without downloading the full parquet.
+
 ## MVP Limitations
 
 - The MVP is synthetic and parameterized.

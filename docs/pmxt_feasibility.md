@@ -28,8 +28,51 @@ PYTHONPATH=src python3 -m pm_dfba_sim.run_pmxt_probe \
 
 Remote mode downloads only the requested parquet file to a temporary directory, then writes derived outputs under ignored `outputs/pmxt_probe/`.
 
+URL diagnostics without downloading the full parquet:
+
+```bash
+PYTHONPATH=src python3 -m pm_dfba_sim.run_pmxt_probe \
+  --url https://r2v2.pmxt.dev/polymarket_orderbook_2026-04-21T00.parquet \
+  --out outputs/pmxt_probe \
+  --max-rows 200000 \
+  --max-markets 3 \
+  --diagnose-url
+```
+
+Diagnostic mode attempts a HEAD request first. If HEAD fails, it tries a safe `Range: bytes=0-1023` GET request. It writes `outputs/pmxt_probe/url_diagnostics.json` and does not download the full parquet.
+
+## Observed Remote Access Result
+
+On 2026-06-29, the diagnostic command against:
+
+```text
+https://r2v2.pmxt.dev/polymarket_orderbook_2026-04-21T00.parquet
+```
+
+returned:
+
+- HTTP status: `403`
+- Content type: `text/plain; charset=UTF-8`
+- Content length: `17`
+- Accepts ranges: `false`
+- Requires API key guess: `true`
+- Notes: `HEAD request failed: HTTP 403: Forbidden`; `Range GET failed: HTTP 403: Forbidden`
+
+This looks like an access-control/API-key restriction rather than a successful public range-readable parquet response. It does not verify whether the file is a tick-level hourly partition or a static hourly snapshot.
+
+If remote access fails, download one PMXT parquet manually into `~/Downloads`, then run:
+
+```bash
+PYTHONPATH=src python3 -m pm_dfba_sim.run_pmxt_probe \
+  --input ~/Downloads/polymarket_orderbook_2026-04-21T00.parquet \
+  --out outputs/pmxt_probe \
+  --max-rows 200000 \
+  --max-markets 3
+```
+
 ## Outputs
 
+- `outputs/pmxt_probe/url_diagnostics.json` when probing a URL
 - `outputs/pmxt_probe/schema_summary.json`
 - `outputs/pmxt_probe/event_type_counts.csv`
 - `outputs/pmxt_probe/market_sample.csv`
@@ -51,6 +94,14 @@ If the event stream schema contains parseable full `book` snapshots and later `p
 - liquidation exit-curve calibration ingredients.
 
 If `last_trade_price` events are present with usable timestamps and market identifiers, PMXT may also help align trade-price moves to reconstructed book states.
+
+The report classifies each inspected file as one of:
+
+- `tick_level_hourly_partition`
+- `static_hourly_snapshot`
+- `unknown`
+
+The classification uses only observable sample properties: row count, distinct timestamp count, timestamp span, event type counts, and number of markets. It is a feasibility signal, not a guarantee that all archive partitions behave the same way.
 
 ## What PMXT Does Not Prove By Itself
 

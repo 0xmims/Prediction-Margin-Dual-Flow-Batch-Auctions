@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import math
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import pandas as pd
 
@@ -33,6 +36,7 @@ def run_pmxt_probe(
     max_rows: int = 200_000,
     max_markets: int = 3,
     source_label: str | None = None,
+    url_diagnostics: dict[str, Any] | None = None,
 ) -> PMXTProbeResult:
     """Run a bounded feasibility probe over one PMXT parquet file."""
 
@@ -71,10 +75,13 @@ def run_pmxt_probe(
         depth=depth,
         max_rows=max_rows,
         max_markets=max_markets,
+        url_diagnostics=url_diagnostics,
     )
 
     with (output_path / "schema_summary.json").open("w") as f:
         json.dump(schema_summary, f, indent=2, default=_json_default)
+    if url_diagnostics is not None:
+        write_url_diagnostics(output_path / "url_diagnostics.json", url_diagnostics)
     event_counts.to_csv(output_path / "event_type_counts.csv", index=False)
     market_sample.to_csv(output_path / "market_sample.csv", index=False)
     top_of_book.to_csv(output_path / "top_of_book_timeseries.csv", index=False)
@@ -106,6 +113,61 @@ def read_parquet_sample(path: str | Path, max_rows: int) -> pd.DataFrame:
         return next(batches).to_pandas()
     except StopIteration:
         return pd.DataFrame()
+
+
+def diagnose_pmxt_url(
+    url: str,
+    opener: Callable[..., Any] = urllib.request.urlopen,
+    timeout: int = 20,
+    attempted_at_utc: str | None = None,
+) -> dict[str, Any]:
+    """Perform a safe PMXT URL diagnostic without downloading the full parquet."""
+
+    attempted_at = attempted_at_utc or datetime.now(timezone.utc).isoformat()
+    notes: list[str] = []
+    diagnostics: dict[str, Any] = {
+        "url": url,
+        "attempted_at_utc": attempted_at,
+        "http_status": None,
+        "content_type": None,
+        "content_length": None,
+        "accepts_ranges": None,
+        "requires_api_key_guess": "unknown",
+        "notes": notes,
+    }
+
+    head_request = urllib.request.Request(url, method="HEAD")
+    try:
+        with opener(head_request, timeout=timeout) as response:
+            _merge_response_diagnostics(diagnostics, response)
+            notes.append("HEAD request succeeded.")
+            diagnostics["requires_api_key_guess"] = _api_key_guess(diagnostics["http_status"])
+            return diagnostics
+    except Exception as exc:  # noqa: BLE001 - diagnostic should report, not crash.
+        notes.append(f"HEAD request failed: {_exception_summary(exc)}")
+        _merge_exception_diagnostics(diagnostics, exc)
+
+    range_request = urllib.request.Request(url, headers={"Range": "bytes=0-1023"}, method="GET")
+    try:
+        with opener(range_request, timeout=timeout) as response:
+            _merge_response_diagnostics(diagnostics, response)
+            response.read(1024)
+            status = diagnostics["http_status"]
+            if status == 206:
+                notes.append("Range GET succeeded with HTTP 206 Partial Content.")
+            else:
+                notes.append(f"Range GET returned HTTP {status}; server may ignore range requests.")
+            diagnostics["requires_api_key_guess"] = _api_key_guess(status)
+    except Exception as exc:  # noqa: BLE001 - diagnostic should report, not crash.
+        notes.append(f"Range GET failed: {_exception_summary(exc)}")
+        _merge_exception_diagnostics(diagnostics, exc)
+        diagnostics["requires_api_key_guess"] = _api_key_guess(diagnostics["http_status"])
+
+    return diagnostics
+
+
+def write_url_diagnostics(path: Path, diagnostics: dict[str, Any]) -> None:
+    path.write_text(json.dumps(diagnostics, indent=2, default=_json_default) + "\n")
 
 
 def detect_event_type_column(frame_or_columns: pd.DataFrame | Iterable[str]) -> str | None:
@@ -368,6 +430,7 @@ def build_schema_summary(
     depth: pd.DataFrame,
     max_rows: int,
     max_markets: int,
+    url_diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     event_types = set(event_counts.get("event_type", pd.Series(dtype=str)).astype(str).str.lower())
     has_depth = (
@@ -386,6 +449,12 @@ def build_schema_summary(
         "stale_loss_proxy_construction": bool(not top_of_book.empty),
         "true_maker_taker_latency_race_proof": False,
     }
+    hourly_interpretation = build_hourly_file_interpretation(
+        frame=frame,
+        event_counts=event_counts,
+        timestamp_column=timestamp_column,
+        market_column=market_column,
+    )
     return {
         "source": source_label,
         "rows_loaded": int(len(frame)),
@@ -408,6 +477,8 @@ def build_schema_summary(
         "trade_events_present": "last_trade_price" in event_types or any("trade" in event for event in event_types),
         "trade_side_available": trade_side_column is not None,
         "order_lifecycle_columns_observed": order_lifecycle_columns,
+        "hourly_file_interpretation": hourly_interpretation,
+        "url_diagnostics": url_diagnostics,
         "suitability": suitability,
         "caveats": [
             "This probe uses a bounded row sample from one PMXT parquet file.",
@@ -418,9 +489,92 @@ def build_schema_summary(
     }
 
 
+def build_hourly_file_interpretation(
+    frame: pd.DataFrame,
+    event_counts: pd.DataFrame,
+    timestamp_column: str | None = None,
+    market_column: str | None = None,
+) -> dict[str, Any]:
+    timestamp_col = timestamp_column or detect_timestamp_column(frame)
+    market_col = market_column or detect_market_column(frame)
+    event_type_counts = {
+        str(row["event_type"]): int(row["count"]) for _, row in event_counts.iterrows()
+    }
+    normalized_event_types = {event_type.lower() for event_type in event_type_counts}
+    expected_event_types = {
+        event_type: event_type in normalized_event_types for event_type in EVENT_TYPES_OF_INTEREST
+    }
+
+    timestamp_values = pd.Series(dtype="datetime64[ns, UTC]")
+    if timestamp_col is not None and timestamp_col in frame:
+        timestamp_values = _parse_timestamps(frame[timestamp_col]).dropna()
+    distinct_timestamps = int(timestamp_values.nunique()) if not timestamp_values.empty else 0
+    min_timestamp = timestamp_values.min() if not timestamp_values.empty else None
+    max_timestamp = timestamp_values.max() if not timestamp_values.empty else None
+    span_seconds = (
+        float((max_timestamp - min_timestamp).total_seconds())
+        if min_timestamp is not None and max_timestamp is not None
+        else None
+    )
+    distinct_markets = (
+        int(frame[market_col].astype(str).nunique()) if market_col is not None and market_col in frame else 0
+    )
+    classification = classify_hourly_file(
+        rows_loaded=len(frame),
+        distinct_timestamps=distinct_timestamps,
+        timestamp_span_seconds=span_seconds,
+        event_type_counts=event_type_counts,
+        distinct_markets=distinct_markets,
+    )
+    return {
+        "classification": classification,
+        "rows_loaded": int(len(frame)),
+        "distinct_timestamps": distinct_timestamps,
+        "min_timestamp": min_timestamp.isoformat() if min_timestamp is not None else None,
+        "max_timestamp": max_timestamp.isoformat() if max_timestamp is not None else None,
+        "timestamp_span_seconds": span_seconds,
+        "event_type_counts": event_type_counts,
+        "expected_event_types_present": expected_event_types,
+        "distinct_markets": distinct_markets,
+        "criteria": [
+            "tick_level_hourly_partition: multiple timestamps plus tick/update event types such as price_change or last_trade_price.",
+            "static_hourly_snapshot: very few timestamps and mostly book/snapshot records.",
+            "unknown: insufficient timestamp/event diversity or missing schema fields.",
+        ],
+    }
+
+
+def classify_hourly_file(
+    rows_loaded: int,
+    distinct_timestamps: int,
+    timestamp_span_seconds: float | None,
+    event_type_counts: dict[str, int],
+    distinct_markets: int = 0,
+) -> str:
+    normalized_event_types = {event_type.lower() for event_type in event_type_counts}
+    has_tick_events = bool(
+        normalized_event_types.intersection({"price_change", "last_trade_price", "tick_size_change"})
+    )
+    has_multiple_event_types = len([count for count in event_type_counts.values() if count > 0]) > 1
+    has_time_movement = distinct_timestamps > 1 and (timestamp_span_seconds or 0.0) > 0.0
+    if rows_loaded >= 3 and distinct_timestamps >= 3 and has_time_movement and has_tick_events:
+        return "tick_level_hourly_partition"
+    if rows_loaded >= 3 and distinct_timestamps >= 2 and has_multiple_event_types and has_tick_events:
+        return "tick_level_hourly_partition"
+    if distinct_timestamps <= 1 and not has_tick_events:
+        return "static_hourly_snapshot"
+    if distinct_timestamps <= 2 and normalized_event_types.issubset({"book", "snapshot"}):
+        return "static_hourly_snapshot"
+    if distinct_markets > 1 and has_tick_events and has_multiple_event_types:
+        return "tick_level_hourly_partition"
+    return "unknown"
+
+
 def write_probe_report(path: Path, summary: dict[str, Any]) -> None:
     required = summary["required_event_types"]
     suitability = summary["suitability"]
+    hourly = summary["hourly_file_interpretation"]
+    url_diagnostics = summary.get("url_diagnostics")
     lines = [
         "# PMXT v2 Feasibility Probe",
         "",
@@ -437,6 +591,45 @@ def write_probe_report(path: Path, summary: dict[str, Any]) -> None:
         f"- Are trade events present? {'Yes' if summary['trade_events_present'] else 'No'}.",
         f"- Are trade direction / taker side fields available? {'Yes' if summary['trade_side_available'] else 'No'}.",
         "",
+        "## URL Diagnostics",
+        "",
+    ]
+    if url_diagnostics:
+        lines.extend(
+            [
+                f"- URL: {url_diagnostics.get('url')}",
+                f"- Attempted at UTC: {url_diagnostics.get('attempted_at_utc')}",
+                f"- HTTP status: {url_diagnostics.get('http_status')}",
+                f"- Content type: {url_diagnostics.get('content_type')}",
+                f"- Content length: {url_diagnostics.get('content_length')}",
+                f"- Accepts ranges: {url_diagnostics.get('accepts_ranges')}",
+                f"- Requires API key guess: {url_diagnostics.get('requires_api_key_guess')}",
+                f"- Notes: {'; '.join(url_diagnostics.get('notes', []))}",
+                "",
+            ]
+        )
+    else:
+        lines.extend(["No URL diagnostics were collected for this local-input run.", ""])
+    lines.extend(
+        [
+            "## Hourly file interpretation",
+            "",
+            f"- Classification: `{hourly['classification']}`.",
+            f"- Rows loaded: {hourly['rows_loaded']}.",
+            f"- Distinct timestamps: {hourly['distinct_timestamps']}.",
+            f"- Min timestamp: {hourly['min_timestamp']}.",
+            f"- Max timestamp: {hourly['max_timestamp']}.",
+            f"- Timestamp span seconds: {hourly['timestamp_span_seconds']}.",
+            f"- Distinct markets: {hourly['distinct_markets']}.",
+            f"- Event type counts: {hourly['event_type_counts']}.",
+            f"- Expected event types present: {hourly['expected_event_types_present']}.",
+            "",
+            "A tick-level hourly partition should have many rows, multiple timestamps, and usually multiple event types such as `book`, `price_change`, or `last_trade_price`. A static hourly snapshot would likely have very few timestamps and mostly `book`/snapshot records.",
+            "",
+        ]
+    )
+    lines.extend(
+        [
         "## Missing For True Latency-Race Proof",
         "",
         "This sample does not establish true maker-cancel-versus-taker-hit race proof. That would require exchange-side order lifecycle sequencing, cancellation timing, taker-hit timing, and maker/order identity or equivalent account-level quote lifecycle fields.",
@@ -451,8 +644,15 @@ def write_probe_report(path: Path, summary: dict[str, Any]) -> None:
         f"- Stale-loss proxy construction: {_yes_no(suitability['stale_loss_proxy_construction'])}",
         f"- True maker/taker latency-race proof: {_yes_no(suitability['true_maker_taker_latency_race_proof'])}",
         "",
+        "## What this does and does not prove",
+        "",
+        "If PMXT contains tick-level book and trade events, it may support event-window replay, depth studies, liquidation exit-curve proxies, and stale-loss proxy construction.",
+        "",
+        "It still does not prove true maker-cancel-versus-taker-hit latency races unless exchange-side order lifecycle sequencing, cancel timing, taker-hit timing, and maker/order identity are present.",
+        "",
         "PMXT may support L2 replay ingredients if top-of-book and depth reconstruct cleanly, but it should not be used to claim true stale-quote races unless order lifecycle and cancellation sequencing are visible.",
-    ]
+        ]
+    )
     path.write_text("\n".join(lines) + "\n")
 
 
@@ -738,3 +938,59 @@ def _json_default(value: Any) -> Any:
     if isinstance(value, pd.Timestamp):
         return value.isoformat()
     return str(value)
+
+
+def _merge_response_diagnostics(diagnostics: dict[str, Any], response: Any) -> None:
+    headers = getattr(response, "headers", {}) or {}
+    status = getattr(response, "status", None) or getattr(response, "code", None)
+    diagnostics["http_status"] = int(status) if status is not None else None
+    diagnostics["content_type"] = _header_value(headers, "content-type")
+    content_length = _header_value(headers, "content-length")
+    diagnostics["content_length"] = int(content_length) if content_length and content_length.isdigit() else None
+    diagnostics["accepts_ranges"] = _accepts_ranges(headers, status)
+
+
+def _merge_exception_diagnostics(diagnostics: dict[str, Any], exc: Exception) -> None:
+    if isinstance(exc, urllib.error.HTTPError):
+        diagnostics["http_status"] = int(exc.code)
+        diagnostics["content_type"] = _header_value(exc.headers, "content-type")
+        content_length = _header_value(exc.headers, "content-length")
+        diagnostics["content_length"] = (
+            int(content_length) if content_length and content_length.isdigit() else diagnostics["content_length"]
+        )
+        diagnostics["accepts_ranges"] = _accepts_ranges(exc.headers, exc.code)
+
+
+def _header_value(headers: Any, key: str) -> str | None:
+    if headers is None:
+        return None
+    if hasattr(headers, "get"):
+        value = headers.get(key) or headers.get(key.title()) or headers.get(key.lower())
+        return str(value) if value is not None else None
+    return None
+
+
+def _accepts_ranges(headers: Any, status: int | None) -> bool | str:
+    accept_ranges = (_header_value(headers, "accept-ranges") or "").lower()
+    content_range = _header_value(headers, "content-range")
+    if "bytes" in accept_ranges or content_range or status == 206:
+        return True
+    if status in {200, 404, 401, 403}:
+        return False
+    return "unknown"
+
+
+def _api_key_guess(status: int | None) -> bool | str:
+    if status in {401, 403}:
+        return True
+    if status in {200, 206, 404}:
+        return False
+    return "unknown"
+
+
+def _exception_summary(exc: Exception) -> str:
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"HTTP {exc.code}: {exc.reason}"
+    if isinstance(exc, urllib.error.URLError):
+        return f"URL error: {exc.reason}"
+    return f"{type(exc).__name__}: {exc}"
