@@ -539,13 +539,19 @@ def apply_signed_diffs(side: dict, diffs: Optional[Iterable[Mapping[str, Any]]])
 
 @dataclass
 class BookState:
-    """Mutable reconstructed book. Yielded in place by ``fold_book_events``."""
+    """Mutable reconstructed book. Yielded in place by ``fold_book_events``.
+
+    ``checkpoint`` is set only on checkpoint yields (see ``fold_book_events``):
+    it marks that this yield represents the book *as of* that checkpoint time,
+    with ``event_time`` still holding the last applied event's time.
+    """
 
     bids: dict = field(default_factory=dict)
     asks: dict = field(default_factory=dict)
     anchor_seq: Optional[int] = None
     event_time: Optional[datetime] = None
     session_id: Optional[str] = None
+    checkpoint: Optional[datetime] = None
 
     @property
     def best_bid(self) -> Optional[Decimal]:
@@ -588,6 +594,7 @@ def fold_book_events(
     snapshots: Sequence[Mapping[str, Any]],
     diffs: Sequence[Mapping[str, Any]],
     stats: Optional[FoldStats] = None,
+    checkpoints: Optional[Sequence[datetime]] = None,
 ) -> Iterator[BookState]:
     """Replay a window: seed snapshot, re-anchor on each new snapshot, apply diffs.
 
@@ -595,11 +602,29 @@ def fold_book_events(
     anchor's ``seq``; anything else is counted and skipped, never accumulated
     across snapshot boundaries. The yielded ``BookState`` is mutated in place —
     callers must read metrics immediately, not store references.
+
+    ``checkpoints`` (ascending datetimes) request extra *as-of* yields: before
+    applying any event later than a pending checkpoint, the current book is
+    yielded with ``state.checkpoint`` set to that checkpoint time. This gives
+    exact last-state-at-or-before sampling without copying books. Checkpoints
+    that precede the first book state are skipped.
     """
 
     stats = stats if stats is not None else FoldStats()
     state = BookState()
     last_diff_seq: Optional[int] = None
+    checkpoint_list = sorted(checkpoints) if checkpoints else []
+    checkpoint_index = 0
+
+    def pending_checkpoints(before: Optional[datetime]) -> Iterator[datetime]:
+        nonlocal checkpoint_index
+        while checkpoint_index < len(checkpoint_list) and (
+            before is None or checkpoint_list[checkpoint_index] < before
+        ):
+            checkpoint = checkpoint_list[checkpoint_index]
+            checkpoint_index += 1
+            if state.event_time is not None and state.event_time <= checkpoint:
+                yield checkpoint
 
     def apply_snapshot(row: Mapping[str, Any]) -> None:
         nonlocal last_diff_seq
@@ -625,6 +650,10 @@ def fold_book_events(
         yield state
 
     for event_time, _, seq, kind, row in events:
+        for checkpoint in pending_checkpoints(event_time):
+            state.checkpoint = checkpoint
+            yield state
+            state.checkpoint = None
         if kind == "snapshot":
             apply_snapshot(row)
         else:
@@ -643,6 +672,11 @@ def fold_book_events(
         if state.is_crossed():
             stats.crossed_book_events += 1
         yield state
+
+    for checkpoint in pending_checkpoints(None):
+        state.checkpoint = checkpoint
+        yield state
+        state.checkpoint = None
 
 
 # ---------------------------------------------------------------------------

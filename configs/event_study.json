@@ -1,0 +1,74 @@
+{
+  "window": {
+    "baseline_start_minutes": -60,
+    "baseline_end_minutes": -5,
+    "impact_end_minutes": 15,
+    "recovery_end_minutes": 60,
+    "grid_seconds": 5,
+    "trade_through_lags_seconds": [1, 5, 30],
+    "exit_quantities": [100, 1000, 5000],
+    "recovery_fraction": 0.8
+  },
+  "events": [
+    {
+      "event_id": "fomc-2026-06-17",
+      "name": "FOMC June 2026 rate decision",
+      "anchor_time_utc": "2026-06-17T18:00:00Z",
+      "category": "public_scheduled",
+      "timestamp_basis": "Scheduled 14:00 ET FOMC statement; June Kalshi legs resolved 2026-06-17T18:02:38Z in market_lifecycle_events.",
+      "markets": [
+        {"market_id": "KXFEDDECISION-26JUN-H0", "platform": "kalshi", "role": "terminal_leg"},
+        {"market_id": "KXFEDDECISION-26JUN-H25", "platform": "kalshi", "role": "terminal_leg"},
+        {"market_id": "1654957", "platform": "polymarket", "role": "interim_leg"},
+        {"market_id": "1654958", "platform": "polymarket", "role": "interim_leg"},
+        {"market_id": "1654960", "platform": "polymarket", "role": "interim_leg"},
+        {"market_id": "KXFEDDECISION-26JUL-H25", "platform": "kalshi", "role": "interim_leg"},
+        {"market_id": "921947", "platform": "polymarket", "role": "control"},
+        {"market_id": "1284346", "platform": "polymarket", "role": "control"}
+      ]
+    },
+    {
+      "event_id": "la-primary-2026-06-03",
+      "name": "LA mayoral / CA governor primary results night",
+      "anchor_time_utc": "2026-06-03T03:22:00Z",
+      "category": "public_election_results",
+      "timestamp_basis": "Largest coordinated jump minute across LA-mayor legs in the tailscale probe jump scan (results flow after 20:00 PT poll close; legs resolved 2026-06-08/09).",
+      "markets": [
+        {"market_id": "KXLAMAYORMATCHUP-26JUN-KBASSPRA", "platform": "kalshi", "role": "interim_leg"},
+        {"market_id": "KXMAYORLA-26-KBAS", "platform": "kalshi", "role": "interim_leg"},
+        {"market_id": "KXMAYORLA-26-SPRA", "platform": "kalshi", "role": "interim_leg"},
+        {"market_id": "KXMAYORLA-26-NRAM", "platform": "kalshi", "role": "interim_leg"},
+        {"market_id": "KXCAGOVPRIMARY1ST-26JUN02-1ST-SHIL", "platform": "kalshi", "role": "interim_leg"},
+        {"market_id": "688127", "platform": "polymarket", "role": "control"},
+        {"market_id": "908000", "platform": "polymarket", "role": "control"}
+      ]
+    },
+    {
+      "event_id": "iran-ceasefire-2026-06-14",
+      "name": "US-Iran ceasefire/peace-deal headlines",
+      "anchor_time_utc": "2026-06-14T21:18:00Z",
+      "category": "public_headline",
+      "timestamp_basis": "Largest coordinated jump minute across the three Iran markets in the tailscale probe jump scan (unscheduled headline; 2270330 +30c, 1971905 +12c within minutes).",
+      "markets": [
+        {"market_id": "2270330", "platform": "polymarket", "role": "headline_target"},
+        {"market_id": "1971905", "platform": "polymarket", "role": "headline_target"},
+        {"market_id": "1370652", "platform": "polymarket", "role": "headline_target"},
+        {"market_id": "908000", "platform": "polymarket", "role": "control"},
+        {"market_id": "KXVPRESNOMR-28-DJT", "platform": "kalshi", "role": "control"}
+      ]
+    },
+    {
+      "event_id": "iran-enrichment-2026-06-18",
+      "name": "Iran uranium-enrichment headlines",
+      "anchor_time_utc": "2026-06-18T20:02:00Z",
+      "category": "public_headline",
+      "timestamp_basis": "Largest jump minute for 1370652 in the tailscale probe jump scan (+18c; 2270330 excluded, resolved 2026-06-18T00:31Z before this anchor).",
+      "markets": [
+        {"market_id": "1370652", "platform": "polymarket", "role": "headline_target"},
+        {"market_id": "1971905", "platform": "polymarket", "role": "headline_target"},
+        {"market_id": "688127", "platform": "polymarket", "role": "control"},
+        {"market_id": "921947", "platform": "polymarket", "role": "control"}
+      ]
+    }
+  ]
+}
