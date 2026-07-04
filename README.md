@@ -124,13 +124,13 @@ contract, safety rules, and interpretation guardrails.
 
 ## Paper Figures
 
-Generate deterministic explanatory concept figures for the v0.1 coworker paper draft:
+Generate two deterministic explanatory concept figures for the v0.1 coworker paper draft:
 
 ```bash
 python3 -m pm_dfba_sim.run_paper_figures --out outputs/paper_figures
 ```
 
-These PNGs are schematic concept figures, not empirical results. See `docs/paper_figures.md` for the output paths and intended use.
+These PNGs are schematic concept figures, not empirical results. The current simulator does not implement a full PM-DFBA state machine; see `docs/paper_figures.md` for the output paths and intended use.
 
 ## MVP Limitations
 

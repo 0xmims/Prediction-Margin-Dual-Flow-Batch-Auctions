@@ -14,14 +14,15 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
-from matplotlib.patches import FancyArrowPatch, FancyBboxPatch, Rectangle
+from matplotlib.patches import FancyArrowPatch, Rectangle
 
 
 PAPER_CONCEPT_FIGURES = (
     "clob_vs_pm_dfba_jump_timeline.png",
     "marginability_episode_trace.png",
-    "pm_dfba_state_machine.png",
 )
+
+LEGACY_DEFAULT_FIGURES = ("pm_dfba_state_machine.png",)
 
 _INK = "#1f2933"
 _MUTED = "#667085"
@@ -38,10 +39,13 @@ def generate_paper_concept_figures(out_dir: str | Path) -> list[Path]:
 
     output_path = Path(out_dir)
     output_path.mkdir(parents=True, exist_ok=True)
+    for filename in LEGACY_DEFAULT_FIGURES:
+        legacy_path = output_path / filename
+        if legacy_path.exists():
+            legacy_path.unlink()
     renderers: tuple[tuple[str, Callable[[Path], None]], ...] = (
         (PAPER_CONCEPT_FIGURES[0], plot_clob_vs_pm_dfba_jump_timeline),
         (PAPER_CONCEPT_FIGURES[1], plot_marginability_episode_trace),
-        (PAPER_CONCEPT_FIGURES[2], plot_pm_dfba_state_machine),
     )
     written: list[Path] = []
     for filename, renderer in renderers:
@@ -186,107 +190,6 @@ def plot_marginability_episode_trace(path: str | Path) -> None:
     plt.close(fig)
 
 
-def plot_pm_dfba_state_machine(path: str | Path) -> None:
-    fig = plt.figure(figsize=(13.2, 7.2))
-    grid = fig.add_gridspec(1, 2, width_ratios=(1.45, 1.05))
-    ax = fig.add_subplot(grid[0, 0])
-    table_ax = fig.add_subplot(grid[0, 1])
-    ax.set_title("PM-DFBA State-Contingent Operation", fontsize=15, fontweight="bold", color=_INK)
-    ax.set_xlim(0, 10)
-    ax.set_ylim(0, 8)
-    ax.axis("off")
-
-    nodes = {
-        "Normal": (1.2, 4.1),
-        "Scheduled\nCatalyst Call": (3.9, 6.25),
-        "Volatility\nCall": (3.9, 4.1),
-        "Post-Jump\nStabilization": (6.9, 4.1),
-        "Resolution /\nReduce-Only": (6.9, 6.25),
-        "Thin Market /\nNo-New-Leverage": (6.9, 1.75),
-    }
-    colors = {
-        "Normal": "#eff8ff",
-        "Scheduled\nCatalyst Call": "#fff7ed",
-        "Volatility\nCall": "#fef3f2",
-        "Post-Jump\nStabilization": "#ecfdf3",
-        "Resolution /\nReduce-Only": "#f4f3ff",
-        "Thin Market /\nNo-New-Leverage": "#f8fafc",
-    }
-    for label, (x, y) in nodes.items():
-        _draw_state_node(ax, x, y, label, colors[label])
-
-    _state_arrow(ax, nodes["Normal"], nodes["Scheduled\nCatalyst Call"], "known event time")
-    _state_arrow(
-        ax,
-        nodes["Normal"],
-        nodes["Volatility\nCall"],
-        "indicative move\nexceeds threshold",
-        label_offset=0.55,
-    )
-    _state_arrow(
-        ax,
-        nodes["Volatility\nCall"],
-        nodes["Post-Jump\nStabilization"],
-        "auction clears /\nimbalance stabilizes",
-        label_offset=0.65,
-    )
-    _state_arrow(
-        ax,
-        nodes["Post-Jump\nStabilization"],
-        nodes["Normal"],
-        "depth and spread recover",
-        bend=0.18,
-        label_offset=-0.55,
-    )
-    _state_arrow(ax, nodes["Scheduled\nCatalyst Call"], nodes["Resolution /\nReduce-Only"], "close to settlement", dashed=True)
-    _state_arrow(ax, nodes["Volatility\nCall"], nodes["Resolution /\nReduce-Only"], "any state:\nclose to settlement", dashed=True)
-    _state_arrow(ax, nodes["Post-Jump\nStabilization"], nodes["Thin Market /\nNo-New-Leverage"], "any state:\ndepth/backstop low", dashed=True)
-    _state_arrow(ax, nodes["Normal"], nodes["Thin Market /\nNo-New-Leverage"], "depth/backstop\nbelow threshold", dashed=True)
-
-    ax.text(
-        4.8,
-        0.35,
-        "Concept figure only: state transitions are mechanism-design logic, not empirical estimates.",
-        ha="center",
-        fontsize=9,
-        color=_MUTED,
-    )
-
-    table_ax.axis("off")
-    table_ax.set_title("State Policy Sketch", fontsize=13, fontweight="bold", color=_INK, pad=10)
-    rows = [
-        ["Normal", "short frequent batches", "normal margin"],
-        ["Volatility Call", "extended batch", "pause new leverage / collars"],
-        ["Stabilization", "shorter batches", "risk-reducing flow"],
-        ["Resolution", "call-only or reduce-only", "no new leverage"],
-        ["Thin Market", "restricted clearing", "lower/no leverage"],
-    ]
-    table = table_ax.table(
-        cellText=rows,
-        colLabels=["State", "Batch behavior", "Margin behavior"],
-        cellLoc="left",
-        colLoc="left",
-        colWidths=[0.24, 0.36, 0.40],
-        bbox=[0.0, 0.08, 1.0, 0.82],
-    )
-    table.auto_set_font_size(False)
-    table.set_fontsize(8.0)
-    for (row, col), cell in table.get_celld().items():
-        cell.set_edgecolor("#d0d5dd")
-        cell.set_linewidth(0.8)
-        if row == 0:
-            cell.set_facecolor("#344054")
-            cell.get_text().set_color("white")
-            cell.get_text().set_fontweight("bold")
-        else:
-            cell.set_facecolor("#ffffff" if row % 2 else "#f9fafb")
-            cell.get_text().set_color(_INK)
-
-    fig.tight_layout()
-    fig.savefig(path, dpi=180)
-    plt.close(fig)
-
-
 def _draw_timeline_axis(ax: Axes, title: str, color: str) -> None:
     ax.set_title(title, loc="left", fontsize=13, fontweight="bold", color=color)
     ax.set_xlim(0, 500)
@@ -318,56 +221,3 @@ def _draw_arrow(ax: Axes, x0: float, y0: float, x1: float, y1: float, color: str
     )
     ax.add_patch(arrow)
     ax.text((x0 + x1) / 2, y0 + 0.03, label, ha="center", va="bottom", fontsize=8, color=color)
-
-
-def _draw_state_node(ax: Axes, x: float, y: float, label: str, facecolor: str) -> None:
-    node = FancyBboxPatch(
-        (x - 1.0, y - 0.45),
-        2.0,
-        0.9,
-        boxstyle="round,pad=0.08,rounding_size=0.13",
-        facecolor=facecolor,
-        edgecolor="#344054",
-        linewidth=1.4,
-        zorder=3,
-    )
-    ax.add_patch(node)
-    ax.text(x, y, label, ha="center", va="center", fontsize=9.5, fontweight="bold", color=_INK, zorder=4)
-
-
-def _state_arrow(
-    ax: Axes,
-    start: tuple[float, float],
-    end: tuple[float, float],
-    label: str,
-    dashed: bool = False,
-    bend: float = 0.0,
-    label_offset: float | None = None,
-) -> None:
-    x0, y0 = start
-    x1, y1 = end
-    style = "arc3,rad=" + str(bend)
-    arrow = FancyArrowPatch(
-        (x0 + 0.95 if x1 >= x0 else x0 - 0.95, y0),
-        (x1 - 0.95 if x1 >= x0 else x1 + 0.95, y1),
-        arrowstyle="->",
-        mutation_scale=12,
-        linewidth=1.25,
-        linestyle="--" if dashed else "-",
-        color="#475467",
-        connectionstyle=style,
-        zorder=2,
-    )
-    ax.add_patch(arrow)
-    if label_offset is None:
-        label_offset = 0.32 if y1 >= y0 else -0.32
-    ax.text(
-        (x0 + x1) / 2,
-        (y0 + y1) / 2 + label_offset,
-        label,
-        ha="center",
-        va="center",
-        fontsize=7.6,
-        color="#475467",
-        bbox=dict(boxstyle="round,pad=0.12", facecolor="white", edgecolor="none", alpha=0.86),
-    )
