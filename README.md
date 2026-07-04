@@ -104,6 +104,24 @@ The ablation runner writes:
 
 The sweep values, latency values, collar mode, and toxic-flow stress multipliers live in `configs/baseline.json` so the load-bearing assumptions are visible and reviewable. The default collar mode is `vwap`, which applies the collar to the average primary liquidation fill; `marginal` is stricter and applies the collar to the final executable unit. Null safe-leverage values are left null in the CSV and omitted as zero-valued points in plots.
 
+## Tailscale Replica Feasibility Probe
+
+Probe the read-only Polymarket/Kalshi TimescaleDB replica for a bounded sample
+of non-sports markets (top-of-book reconstruction, depth bands, trade/book
+alignment, exit-curve proxies, gap checks, resolution joins):
+
+```bash
+PREDICTION_DB_HOST=<tailscale-ip> PYTHONPATH=src python3 -m pm_dfba_sim.run_tailscale_probe \
+  --out outputs/tailscale_probe \
+  --start 2026-05-27T00:00:00Z --end 2026-06-27T00:00:00Z \
+  --max-markets 25 --min-volume 2000
+```
+
+Credentials come from `PREDICTION_DB_*` environment variables or `~/.pgpass`
+and are never written to outputs. This is a feasibility/calibration probe, not
+empirical proof; see `docs/tailscale_db_probe.md` for the reconstruction
+contract, safety rules, and interpretation guardrails.
+
 ## Paper Figures
 
 Generate deterministic explanatory concept figures for the v0.1 coworker paper draft:
