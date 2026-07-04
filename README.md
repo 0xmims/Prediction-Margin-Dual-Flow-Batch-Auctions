@@ -122,6 +122,22 @@ and are never written to outputs. This is a feasibility/calibration probe, not
 empirical proof; see `docs/tailscale_db_probe.md` for the reconstruction
 contract, safety rules, and interpretation guardrails.
 
+## Event-Window Replay Study
+
+Replay displayed books around dated public events (FOMC, election results
+night, dated headlines; quiet controls at the same clock windows) and measure
+depth decay, spread widening, executable `V_exit(Q)` haircuts, recovery times,
+and trade-throughs against tau-lagged displayed books:
+
+```bash
+PREDICTION_DB_HOST=<tailscale-ip> PYTHONPATH=src python3 -m pm_dfba_sim.run_event_study \
+  --config configs/event_study.json --out outputs/event_study
+```
+
+Event anchors and their bases are explicit in `configs/event_study.json`. See
+`docs/event_study.md` for the design, metrics, and what the study can and
+cannot claim.
+
 ## Paper Figures
 
 Generate deterministic explanatory concept figures for the v0.1 coworker paper draft:
